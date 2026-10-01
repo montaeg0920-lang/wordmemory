@@ -99,13 +99,13 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap
     setFlipped(false);
     setHint(false);
     shownAt.current = performance.now();
-    if (item && audioOn && direction === 'en_to_ko') speak(item.term);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index, item?.id]);
 
-  // Speak the answer when revealed in the reverse directions
+  // Pronunciation (written and spoken) only comes with the answer side: on the
+  // front it would be a cue that makes recalling the meaning too easy.
   useEffect(() => {
-    if (flipped && item && audioOn && direction !== 'en_to_ko') speak(item.term);
+    if (flipped && item && audioOn) speak(item.term);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flipped]);
 
@@ -323,7 +323,6 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap
                     <h2 className={`${getTermFontSizeClass(item.term)} font-medium leading-tight`}>
                       <TermText term={item.term} lang={lang} />
                     </h2>
-                    {item.pronunciation && <p className="text-base text-muted">{item.pronunciation}</p>}
                   </>
                 )}
 
