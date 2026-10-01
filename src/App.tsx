@@ -9,10 +9,13 @@ import { StatsScreen } from './components/StatsScreen';
 import { SettingsScreen } from './components/SettingsScreen';
 import { UserProfileModal } from './components/UserProfileModal';
 import { WelcomeOnboardingModal } from './components/WelcomeOnboardingModal';
+import { UsageGuide } from './components/UsageGuide';
+import { getTrialPasteText } from './data/trialWords';
 import { Notice } from './components/ui';
 import {
   STORAGE_ERROR_EVENT,
   completeOnboarding,
+  endTrialOffer,
   createProfile,
   deleteCollection,
   deleteFolder,
@@ -27,6 +30,7 @@ import {
   getUserSettings,
   getVocabularyItems,
   hasCompletedOnboarding,
+  isTrialOfferActive,
   initializeStorageIfNeeded,
   logReviewEvent,
   moveItemsToFolder,
@@ -79,6 +83,10 @@ export default function App() {
   const [activeProfile, setActiveProfile] = useState<UserProfile>(getActiveProfile);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(!hasCompletedOnboarding());
+  const [showGuide, setShowGuide] = useState(false);
+  const [trialOffer, setTrialOffer] = useState(isTrialOfferActive);
+  /** Sample words pre-filled into the paste box when the learner starts the trial. */
+  const [trialPaste, setTrialPaste] = useState<string | null>(null);
 
   const [activePlan, setActivePlan] = useState<SessionPlan | null>(null);
   const [lastPlanOptions, setLastPlanOptions] = useState<SessionOptions>({});
@@ -148,7 +156,16 @@ export default function App() {
   const handleCompleteOnboarding = (name: string, lang: LanguageCode) => {
     completeOnboarding(name, lang);
     setShowOnboarding(false);
+    setTrialOffer(isTrialOfferActive());
+    setShowGuide(true);
     reloadData();
+  };
+  const trialText = trialOffer ? getTrialPasteText(activeProfile.targetLanguage) : null;
+  const startTrial = () => {
+    if (!trialText) return;
+    setShowGuide(false);
+    setTrialPaste(trialText);
+    setCurrentTab('import');
   };
 
   /* ---------- sessions ---------- */
@@ -180,6 +197,11 @@ export default function App() {
   /* ---------- words ---------- */
   const handleSaveItems = (newItems: VocabularyItem[]) => {
     const saved = saveVocabularyItems(newItems);
+    if (saved > 0 && trialOffer) {
+      endTrialOffer();
+      setTrialOffer(false);
+      setTrialPaste(null);
+    }
     reloadData();
     return saved;
   };
@@ -252,6 +274,7 @@ export default function App() {
               setLibraryCollectionId(id);
               setCurrentTab('library');
             }}
+            onTrial={trialText ? startTrial : undefined}
           />
         )}
 
@@ -304,6 +327,7 @@ export default function App() {
             existingItems={items}
             settings={settings}
             onSave={handleSaveItems}
+            initialPaste={trialPaste}
             onSaveCollection={col => {
               saveCollection(col);
               reloadData();
@@ -319,6 +343,7 @@ export default function App() {
             activeProfile={activeProfile}
             onOpenProfileModal={() => setShowProfileModal(true)}
             onUpdateSettings={handleUpdateSettings}
+            onOpenGuide={() => setShowGuide(true)}
             onDataChanged={reloadData}
           />
         )}
@@ -342,6 +367,10 @@ export default function App() {
           initialLanguage={activeProfile.targetLanguage || 'en'}
           onComplete={handleCompleteOnboarding}
         />
+      )}
+
+      {showGuide && !showOnboarding && (
+        <UsageGuide canTry={!!trialText && items.length === 0} onTry={startTrial} onClose={() => setShowGuide(false)} />
       )}
 
       <Navbar currentTab={currentTab} onTabChange={setCurrentTab} />

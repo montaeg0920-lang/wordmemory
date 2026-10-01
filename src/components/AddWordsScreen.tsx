@@ -14,6 +14,8 @@ interface AddWordsScreenProps {
   settings: UserSettings;
   onSave: (items: VocabularyItem[]) => number;
   onSaveCollection: (col: VocabularyCollection) => void;
+  /** First-run trial: opens the paste tab with these sample lines already filled in. */
+  initialPaste?: string | null;
 }
 
 type Tab = 'single' | 'paste' | 'file';
@@ -43,10 +45,11 @@ export const AddWordsScreen: React.FC<AddWordsScreenProps> = ({
   settings,
   onSave,
   onSaveCollection,
+  initialPaste,
 }) => {
   const [collectionId, setCollectionId] = useState(collections[0]?.id || '');
   const [folderId, setFolderId] = useState('');
-  const [tab, setTab] = useState<Tab>('single');
+  const [tab, setTab] = useState<Tab>(initialPaste ? 'paste' : 'single');
   const [showNewCollection, setShowNewCollection] = useState(false);
   const [newCollectionName, setNewCollectionName] = useState('');
 
@@ -142,6 +145,7 @@ export const AddWordsScreen: React.FC<AddWordsScreenProps> = ({
           <BatchImport
             key={tab}
             mode={tab}
+            initialText={tab === 'paste' ? initialPaste || '' : ''}
             lang={lang}
             existingInCollection={existingInCollection}
             existingTerms={existingTerms}
@@ -187,7 +191,6 @@ export const AddWordsScreen: React.FC<AddWordsScreenProps> = ({
               className={inputClass}
               value={newCollectionName}
               onChange={e => setNewCollectionName(e.target.value)}
-              placeholder="예: 토익 필수 어휘"
             />
           </Field>
         </Sheet>
@@ -289,7 +292,6 @@ const SingleWordForm: React.FC<{
             ref={termRef}
             autoFocus
             className={`${inputClass} font-serif text-[17px]`}
-            placeholder={getLanguageMeta(lang).sampleTerm}
             value={row.term}
             autoCapitalize="none"
             autoCorrect="off"
@@ -314,7 +316,6 @@ const SingleWordForm: React.FC<{
       <Field label="뜻" hint="뜻을 비워 두고 Enter를 누르면 AI가 채워 줍니다.">
         <input
           className={inputClass}
-          placeholder={getLanguageMeta(lang).sampleMeaning}
           value={row.meaning}
           onChange={e => setRow({ ...row, meaning: e.target.value })}
           onKeyDown={e => e.key === 'Enter' && save()}
@@ -423,12 +424,13 @@ function localResultLooksWeak(words: ExtractedWord[], text: string, lang: string
 
 const BatchImport: React.FC<{
   mode: Exclude<Tab, 'single'>;
+  initialText: string;
   lang: string;
   existingInCollection: VocabularyItem[];
   existingTerms: Set<string>;
   onSave: (rows: DraftRow[]) => number;
-}> = ({ mode, lang, existingInCollection, existingTerms, onSave }) => {
-  const [text, setText] = useState('');
+}> = ({ mode, initialText, lang, existingInCollection, existingTerms, onSave }) => {
+  const [text, setText] = useState(initialText);
   const [rows, setRows] = useState<DraftRow[] | null>(null);
   const [source, setSource] = useState('');
   const [localTexts, setLocalTexts] = useState<string[]>([]);
@@ -604,9 +606,11 @@ const BatchImport: React.FC<{
         <>
           {mode === 'paste' && (
             <>
+              {initialText && text === initialText && (
+                <Notice>체험용 예시 단어가 들어 있어요. "단어 찾기"를 누르고, 확인한 뒤 저장해 보세요.</Notice>
+              )}
               <textarea
                 className={`${inputClass} h-48 py-3 leading-relaxed`}
-                placeholder={'한 줄에 하나씩 붙여넣으세요\n\nderive - 유래하다\nmitigate  완화하다\n3. subtle : 미묘한'}
                 value={text}
                 onChange={e => setText(e.target.value)}
               />

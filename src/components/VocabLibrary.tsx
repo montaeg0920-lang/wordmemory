@@ -379,7 +379,6 @@ export const VocabLibrary: React.FC<VocabLibraryProps> = ({
               value={nameInput}
               onChange={e => setNameInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && submitName()}
-              placeholder={sheet.includes('ollection') ? '예: 수능 필수 어휘' : '예: Day 1'}
             />
           </Field>
           {sheet === 'manageCollection' && activeCollection && (

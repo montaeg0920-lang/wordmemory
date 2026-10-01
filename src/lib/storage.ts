@@ -34,6 +34,7 @@ const STORAGE_KEYS = {
   PROFILES: 'vocacurve_profiles_v1',
   ACTIVE_USER: 'vocacurve_active_user_id_v1',
   ONBOARDING_DONE: 'vocacurve_onboarding_completed_v1',
+  TRIAL_OFFER: 'vocacurve_trial_offer_v1',
   COLLECTIONS: 'vocacurve_collections_v1',
   FOLDERS: 'vocacurve_folders_v1',
   ITEMS: 'vocacurve_items_v1',
@@ -249,12 +250,24 @@ export function completeOnboarding(name: string, targetLanguage: LanguageCode = 
   const items = getVocabularyItems();
   const collections = getCollections();
   if (items.length === 0) {
+    // Only a fresh install (no words yet) is offered the sample-word trial.
+    localStorage.setItem(STORAGE_KEYS.TRIAL_OFFER, 'true');
     const onlyEmptyDefaults = collections.every(c => c.id.startsWith('col_my_'));
     if (collections.length === 0 || onlyEmptyDefaults) {
       setJson(getUserScopedKey(STORAGE_KEYS.COLLECTIONS), [createDefaultCollection(targetLanguage)]);
     }
   }
   return updated;
+}
+
+/** True until a brand-new learner saves their first words (or dismisses the trial). */
+export function isTrialOfferActive(): boolean {
+  if (typeof window === 'undefined') return false;
+  return localStorage.getItem(STORAGE_KEYS.TRIAL_OFFER) === 'true';
+}
+
+export function endTrialOffer(): void {
+  if (typeof window !== 'undefined') localStorage.removeItem(STORAGE_KEYS.TRIAL_OFFER);
 }
 
 /* ================= Init & migration ================= */

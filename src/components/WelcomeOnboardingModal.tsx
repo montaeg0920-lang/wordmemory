@@ -30,7 +30,7 @@ export const WelcomeOnboardingModal: React.FC<WelcomeOnboardingModalProps> = ({ 
 
         <div className="mt-10 space-y-6">
           <Field label="이름">
-            <input className={inputClass} value={name} onChange={e => setName(e.target.value)} placeholder="어떻게 불러 드릴까요?" />
+            <input className={inputClass} value={name} onChange={e => setName(e.target.value)} />
           </Field>
           <Field label="배우는 언어">
             <LanguagePicker value={lang} onChange={setLang} />

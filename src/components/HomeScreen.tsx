@@ -27,6 +27,8 @@ interface HomeScreenProps {
   onStart: (options: SessionOptions) => void;
   onNavigateTab: (tab: TabType) => void;
   onOpenCollection: (collectionId: string) => void;
+  /** Only set for a brand-new learner who has not saved any words yet. */
+  onTrial?: () => void;
 }
 
 const SECONDS_PER_CARD = 8;
@@ -43,6 +45,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onStart,
   onNavigateTab,
   onOpenCollection,
+  onTrial,
 }) => {
   const lang = getLanguageMeta(activeProfile.targetLanguage);
   const [showOptions, setShowOptions] = useState(false);
@@ -84,7 +87,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
       {/* ---------- Today card ---------- */}
       {items.length === 0 ? (
-        <EmptyStart onAdd={() => onNavigateTab('import')} />
+        <EmptyStart onAdd={() => onNavigateTab('import')} onTrial={onTrial} />
       ) : (
         <Card className="p-5">
           {todayCount > 0 ? (
@@ -251,7 +254,7 @@ const MiniStat: React.FC<{ label: string; value: React.ReactNode }> = ({ label, 
   </div>
 );
 
-const EmptyStart: React.FC<{ onAdd: () => void }> = ({ onAdd }) => (
+const EmptyStart: React.FC<{ onAdd: () => void; onTrial?: () => void }> = ({ onAdd, onTrial }) => (
   <Card className="p-5">
     <p className="text-sm font-medium text-muted">시작하기</p>
     <p className="text-[22px] font-bold mt-1 leading-snug">외울 단어를 먼저 넣어 주세요</p>
@@ -261,5 +264,13 @@ const EmptyStart: React.FC<{ onAdd: () => void }> = ({ onAdd }) => (
     <Button variant="primary" size="lg" block className="mt-5" onClick={onAdd}>
       <Plus className="w-5 h-5" /> 내 단어 추가하기
     </Button>
+    {onTrial && (
+      <>
+        <Button size="lg" block className="mt-2" onClick={onTrial}>
+          예시 단어로 체험해 보기
+        </Button>
+        <p className="text-[12px] text-muted mt-2 text-center">예시 단어 4개로 넣기부터 복습까지 미리 해 볼 수 있어요.</p>
+      </>
+    )}
   </Card>
 );

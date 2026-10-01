@@ -81,7 +81,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         </button>
         <div className="space-y-5">
           <Field label="이름">
-            <input autoFocus className={inputClass} value={name} onChange={e => setName(e.target.value)} placeholder="예: 태균, 동생" />
+            <input autoFocus className={inputClass} value={name} onChange={e => setName(e.target.value)} />
           </Field>
           <Field label="배우는 언어">
             <LanguagePicker value={lang} onChange={setLang} />
