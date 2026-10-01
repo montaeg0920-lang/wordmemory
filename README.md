@@ -30,7 +30,7 @@ View your app in AI Studio: https://ai.studio/apps/c712fba2-50d8-41e0-9050-779a9
 
 **단어 추가**
 - 한 단어: 단어만 입력하고 Enter → AI가 뜻·발음·예문 채움 → 확인 후 저장
-- 붙여넣기 / 사진(OCR, Gemini) / 파일(XLSX·CSV·TXT·DOCX·PDF), 저장 전 미리보기·수정
+- 붙여넣기 / 파일(XLSX·CSV·TXT·DOCX·PDF·이미지), 저장 전 미리보기·수정
 - DOCX를 실제로 압축 해제해서 읽도록 수정, PDF·사진은 Gemini가 읽음
 - AI 실패 시 가짜 데이터를 저장하지 않고 안내만 표시
 
