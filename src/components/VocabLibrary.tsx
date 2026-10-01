@@ -31,7 +31,7 @@ interface VocabLibraryProps {
   onReloadData: () => void;
 }
 
-type StatusFilter = 'all' | MemoryStatus | 'due';
+type StatusFilter = 'all' | MemoryStatus;
 const PAGE = 80;
 
 export const VocabLibrary: React.FC<VocabLibraryProps> = ({
@@ -80,7 +80,7 @@ export const VocabLibrary: React.FC<VocabLibraryProps> = ({
       .filter(i => folderId === 'all' || i.folderId === folderId)
       .filter(i => !q || i.term.toLowerCase().includes(q) || i.userMeaning.toLowerCase().includes(q))
       .map(item => ({ item, view: getMemoryView(memoryStateMap.get(item.id), now) }))
-      .filter(r => (status === 'all' ? true : status === 'due' ? r.view.isDue : r.view.status === status))
+      .filter(r => (status === 'all' || r.view.status === status))
       .sort((a, b) => (b.item.createdAt || 0) - (a.item.createdAt || 0));
   }, [items, collectionId, folderId, query, status, memoryStateMap]);
 
@@ -235,7 +235,6 @@ export const VocabLibrary: React.FC<VocabLibraryProps> = ({
         </div>
         <Select aria-label="상태" value={status} onChange={e => setStatus(e.target.value as StatusFilter)} className="w-32">
           <option value="all">모든 상태</option>
-          <option value="due">복습할 때</option>
           <option value="new">{STATUS_LABEL.new}</option>
           <option value="learning">{STATUS_LABEL.learning}</option>
           <option value="retaining">{STATUS_LABEL.retaining}</option>
