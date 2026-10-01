@@ -53,6 +53,7 @@ import {
 } from './types/database';
 import { EMPTY_REASON_MESSAGE, SessionOptions, SessionPlan, generateSessionPlan } from './lib/memoryEngine';
 import { StarterDeck } from './data/starterDecks';
+import { StarterWord } from './lib/aiClient';
 
 initializeStorageIfNeeded();
 
@@ -185,7 +186,47 @@ export default function App() {
     reloadData();
     return saved;
   };
+  const handleImportGenerated = (title: string, words: StarterWord[]) => {
+    const now = Date.now();
+    const lang = activeProfile.targetLanguage;
+    const collection: VocabularyCollection = {
+      id: `col_ai_${now}`,
+      name: title,
+      sourceLanguage: lang,
+      targetLanguage: 'ko',
+      createdAt: now,
+      updatedAt: now,
+      color: '#2B4C7E',
+    };
+    saveCollection(collection);
+    const added = saveVocabularyItems(
+      words.map((w, i) => ({
+        id: `vocab_${now}_${i}_${Math.random().toString(36).slice(2, 6)}`,
+        collectionId: collection.id,
+        sourceLanguage: lang,
+        targetLanguage: 'ko',
+        term: w.term,
+        lemma: w.term.toLowerCase(),
+        userMeaning: w.meaning,
+        partOfSpeech: w.partOfSpeech || undefined,
+        pronunciation: w.pronunciation || undefined,
+        exampleSentences: w.exampleEn
+          ? [{ id: `ex_${now}_${i}`, source: 'ai' as const, en: w.exampleEn, ko: w.exampleKo || '', clozeBlank: w.term }]
+          : [],
+        createdAt: now + i,
+        updatedAt: now,
+      }))
+    );
+    reloadData();
+    setNotice(`'${title}' ${added}개 단어를 불러왔습니다. 하루 ${settings.dailyNewWords ?? 10}개씩 새 단어로 나옵니다.`);
+    setCurrentTab('home');
+  };
+
   const handleImportDeck = (deck: StarterDeck) => {
+    if (deck.language !== activeProfile.targetLanguage) {
+      setNotice('지금 학습 중인 언어의 단어장만 불러올 수 있습니다.');
+      return;
+    }
     const added = importStarterDeck(deck);
     reloadData();
     setNotice(`'${deck.title}'에서 ${added}개 단어를 불러왔습니다. 하루 ${settings.dailyNewWords ?? 10}개씩 새 단어로 나옵니다.`);
@@ -262,6 +303,7 @@ export default function App() {
               setCurrentTab('library');
             }}
             onImportDeck={handleImportDeck}
+            onImportGenerated={handleImportGenerated}
           />
         )}
 
@@ -330,6 +372,7 @@ export default function App() {
             onOpenProfileModal={() => setShowProfileModal(true)}
             onUpdateSettings={handleUpdateSettings}
             onImportDeck={handleImportDeck}
+            onImportGenerated={handleImportGenerated}
             onDataChanged={reloadData}
           />
         )}

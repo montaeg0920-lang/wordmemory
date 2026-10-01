@@ -1367,7 +1367,7 @@ export const LEGACY_SEED_ITEM_IDS = new Set(
   STARTER_DECKS.flatMap(d => d.items.map(i => i.id))
 );
 
+/** Only the decks of the learner's language — a French learner never sees Japanese decks. */
 export function getStarterDecksForLanguage(lang?: LanguageCode): StarterDeck[] {
-  const exact = STARTER_DECKS.filter(d => d.language === lang);
-  return exact.length > 0 ? exact : STARTER_DECKS;
+  return STARTER_DECKS.filter(d => d.language === lang);
 }

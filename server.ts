@@ -13,7 +13,7 @@ const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.set('trust proxy', true);
-app.use('/api/ai/extract-vocab', express.json({ limit: '12mb' }));
+app.use('/api/ai/extract-vocab', express.json({ limit: '25mb' }));
 app.use(express.json({ limit: '100kb' }));
 
 /**
@@ -45,6 +45,48 @@ app.use('/api/ai', (req, res, next) => {
 const LANGUAGE_NAMES: Record<string, string> = {
   en: 'English', ja: 'Japanese', es: 'Spanish', de: 'German', fr: 'French', zh: 'Chinese',
   he: 'Biblical Hebrew', el: 'Koine (Biblical) Greek', ko: 'Korean', other: 'the source language',
+};
+
+/**
+ * Calls Gemini for a JSON answer. Word extraction does not need long "thinking",
+ * so we ask for a low thinking level (much faster). If the model rejects that
+ * option, we retry once without it.
+ */
+async function generateJson(contents: any, responseSchema: any): Promise<any> {
+  if (!ai) throw new Error('AI_NOT_CONFIGURED');
+  const base = { responseMimeType: 'application/json', responseSchema };
+  let response;
+  try {
+    response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents,
+      config: { ...base, thinkingConfig: { thinkingLevel: 'low' } } as any,
+    });
+  } catch (err: any) {
+    if (!/thinking/i.test(String(err?.message || ''))) throw err;
+    response = await ai.models.generateContent({ model: 'gemini-3.8-flash', contents, config: base });
+  }
+  return JSON.parse(response.text || '{}');
+}
+
+const WORD_LIST_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    words: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          term: { type: Type.STRING },
+          meaning: { type: Type.STRING },
+          partOfSpeech: { type: Type.STRING },
+          pronunciation: { type: Type.STRING },
+        },
+        required: ['term', 'meaning'],
+      },
+    },
+  },
+  required: ['words'],
 };
 
 // Initialize GoogleGenAI client strictly according to skill guidelines
@@ -141,69 +183,100 @@ Generate educational data for spaced repetition learning:
 });
 
 /**
- * Extract a vocabulary list from a photo (OCR) or a PDF using Gemini.
- * Body: { mimeType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/heic' | 'application/pdf', data: base64, sourceLanguage?: string }
+ * Extract a vocabulary list from a photo, a PDF, or plain text (documents, slides, notes).
+ * Body: { mimeType, data: base64 } or { text }, plus sourceLanguage.
  */
 const EXTRACT_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf']);
 app.post('/api/ai/extract-vocab', async (req, res) => {
   try {
-    const { mimeType, data, sourceLanguage = 'en' } = req.body || {};
-    if (!EXTRACT_MIME.has(mimeType) || typeof data !== 'string' || data.length < 10) {
+    const { mimeType, data, text, sourceLanguage = 'en' } = req.body || {};
+    const isText = typeof text === 'string' && text.trim().length > 0;
+    if (!isText && (!EXTRACT_MIME.has(mimeType) || typeof data !== 'string' || data.length < 10)) {
       return res.status(400).json({ error: 'INVALID_FILE' });
+    }
+    if (isText && text.length > 80000) {
+      return res.status(413).json({ error: 'TOO_LARGE' });
     }
     if (!ai) {
       return res.status(503).json({ error: 'AI_NOT_CONFIGURED' });
     }
 
     const langName = LANGUAGE_NAMES[sourceLanguage] || 'the foreign language';
-    const prompt = `This ${mimeType === 'application/pdf' ? 'document' : 'image'} is a vocabulary list or a textbook page for a Korean learner studying ${langName}.
-Extract every vocabulary entry you can see as a list of { term, meaning }.
-- term: the foreign word or phrase exactly as written (keep accents, Hebrew vowel points, Greek accents).
-- meaning: the Korean meaning as written. If no Korean meaning is printed, write a short natural Korean meaning yourself.
-- partOfSpeech: in Korean (명사, 동사, 형용사, 부사 ...) if printed or obvious, otherwise omit.
-- pronunciation: only if printed on the page.
-Ignore page numbers, headings, instructions and example sentences. Do not invent entries that are not on the page. Maximum 300 entries.`;
+    const source = isText ? 'text' : mimeType === 'application/pdf' ? 'document' : 'photo';
+    const prompt = `You extract vocabulary for a Korean learner of ${langName}.
+The ${source} below is a word list, textbook page, handout or notes. Return every vocabulary entry as { term, meaning }.
+Rules:
+- term: the ${langName} word or phrase exactly as written (keep accents, Hebrew vowel points, Greek accents). Only ${langName} entries.
+- meaning: the Korean meaning as written. If none is written, give a short natural Korean meaning.
+- partOfSpeech (Korean, e.g. 명사/동사/형용사/부사) and pronunciation: only if written or obvious; otherwise omit.
+- Remove numbering, bullets, page numbers, headings, instructions and example sentences.
+- Keep the original order. Do not invent entries. Maximum 300 entries.
+- If the photo is rotated, blurry or partly cut off, still read what is legible.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: [
-        {
-          role: 'user',
-          parts: [{ inlineData: { mimeType, data } }, { text: prompt }],
-        },
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            words: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  term: { type: Type.STRING },
-                  meaning: { type: Type.STRING },
-                  partOfSpeech: { type: Type.STRING },
-                  pronunciation: { type: Type.STRING },
-                },
-                required: ['term', 'meaning'],
-              },
-            },
-          },
-          required: ['words'],
-        },
-      },
-    });
-
-    const parsed = JSON.parse(response.text || '{"words":[]}');
+    const parts: any[] = isText ? [{ text: prompt + '\n\n--- TEXT ---\n' + text }] : [{ inlineData: { mimeType, data } }, { text: prompt }];
+    const parsed = await generateJson([{ role: 'user', parts }], WORD_LIST_SCHEMA);
     const words = Array.isArray(parsed.words) ? parsed.words.slice(0, 300) : [];
     return res.json({ success: true, words });
   } catch (err: any) {
     console.error('Gemini extract error:', err);
+    const status = Number(err?.status || err?.code);
+    if (status === 429) return res.status(429).json({ error: 'RATE_LIMITED' });
+    if (status === 413) return res.status(413).json({ error: 'TOO_LARGE' });
     return res.status(500).json({ error: 'AI_FAILED' });
   }
 });
+
+/**
+ * Starter deck for a language that has no built-in deck (e.g. 프랑스어, 스페인어).
+ * Body: { sourceLanguage, level: 'beginner'|'elementary'|'intermediate', topic?: string, count?: number }
+ */
+app.post('/api/ai/starter-deck', async (req, res) => {
+  try {
+    const { sourceLanguage = 'en', level = 'beginner', topic = '', count = 30 } = req.body || {};
+    if (!LANGUAGE_NAMES[sourceLanguage] || sourceLanguage === 'ko' || sourceLanguage === 'other') {
+      return res.status(400).json({ error: 'INVALID_LANGUAGE' });
+    }
+    if (typeof topic !== 'string' || topic.length > 60) return res.status(400).json({ error: 'INVALID_TOPIC' });
+    if (!ai) return res.status(503).json({ error: 'AI_NOT_CONFIGURED' });
+
+    const n = Math.max(10, Math.min(50, Number(count) || 30));
+    const levelText = { beginner: 'absolute beginner (A1)', elementary: 'elementary (A2)', intermediate: 'intermediate (B1)' }[level as string] || 'beginner (A1)';
+    const prompt = `Create a list of the ${n} most useful ${langNameOf(sourceLanguage)} words for a Korean ${levelText} learner${topic ? ` about "${topic}"` : ''}.
+For each word give: term (in ${langNameOf(sourceLanguage)}, with articles/accents where natural), meaning (short Korean), partOfSpeech (Korean), pronunciation (Korean-friendly reading or IPA), exampleEn (one short, natural ${langNameOf(sourceLanguage)} example sentence using the word), exampleKo (Korean translation).
+Use only ${langNameOf(sourceLanguage)} words. No duplicates. Order from most to least useful.`;
+
+    const schema = {
+      type: Type.OBJECT,
+      properties: {
+        words: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              term: { type: Type.STRING },
+              meaning: { type: Type.STRING },
+              partOfSpeech: { type: Type.STRING },
+              pronunciation: { type: Type.STRING },
+              exampleEn: { type: Type.STRING },
+              exampleKo: { type: Type.STRING },
+            },
+            required: ['term', 'meaning'],
+          },
+        },
+      },
+      required: ['words'],
+    };
+    const parsed = await generateJson(prompt, schema);
+    return res.json({ success: true, words: Array.isArray(parsed.words) ? parsed.words.slice(0, n) : [] });
+  } catch (err: any) {
+    console.error('Gemini starter deck error:', err);
+    return res.status(500).json({ error: 'AI_FAILED' });
+  }
+});
+
+function langNameOf(code: string) {
+  return LANGUAGE_NAMES[code] || 'the language';
+}
 
 // Setup Vite middleware in dev or static files in production
 async function startServer() {
