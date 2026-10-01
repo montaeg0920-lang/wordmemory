@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+/* Traditional Hebrew Biblical Textbook Typography (Frank Ruhl Hofshi)
+ * Specifically targeted to Hebrew unicode block U+0590-05FF and presentation forms U+FB1D-FB4F.
+ * This guarantees ONLY Hebrew characters change, while Korean, English, Japanese, and symbols remain 100% untouched.
+ */
+@font-face {
+  font-family: 'HebrewBiblicalFont';
+  font-style: normal;
+  font-weight: 400 900;
+  font-display: swap;
+  src: local('Frank Ruhl Hofshi'), local('FrankRuehl'), local('David Libre'), local('Noto Serif Hebrew'),
+       url('https://fonts.gstatic.com/s/frankruhlhofshi/v21/I_u0MoOVpRHSMVxtONwWtmDBzeSoBL7H.ttf') format('truetype');
+  unicode-range: U+0590-05FF, U+FB1D-FB4F;
+}
+
+@layer base {
+  body {
+    font-family: 'HebrewBiblicalFont', -apple-system, BlinkMacSystemFont, "Plus Jakarta Sans", "Pretendard Variable", Pretendard, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    overscroll-behavior-y: none;
+    word-break: keep-all;
+    overflow-wrap: break-word;
+  }
+
+  /* Universal word unity rule: individual words must not break across lines */
+  h1, h2, h3, h4, h5, h6, p, span, div, li, blockquote, label, button {
+    word-break: keep-all;
+    overflow-wrap: break-word;
+  }
+
+  input, textarea {
+    user-select: text;
+    word-break: keep-all;
+    overflow-wrap: break-word;
+  }
+}
+
+/* Explicit Hebrew Typography rules for clarity:
+ * Ensures Vav (ו), Nun (נ, ן), Zayin (ז), Dalet (ד), Resh (ר), and vowel points (nikkud)
+ * match the traditional Hebrew grammar textbook serif style with clear stroke contrast.
+ */
+:lang(he),
+[dir="rtl"],
+.font-hebrew,
+[data-lang="he"] {
+  font-family: "Frank Ruhl Hofshi", "Noto Serif Hebrew", "David Libre", "SBL Hebrew", "Ezra SIL", "Taamey Frank CLM", serif !important;
+  font-feature-settings: "kern" 1, "mark" 1, "mkmk" 1;
+}
+
+/* Hide scrollbar for clean mobile tabs */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
