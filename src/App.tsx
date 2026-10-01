@@ -33,6 +33,8 @@ import {
   isTrialOfferActive,
   initializeStorageIfNeeded,
   logReviewEvent,
+  removeReviewEvent,
+  restoreMemoryState,
   moveItemsToFolder,
   requestPersistentStorage,
   saveCollection,
@@ -187,6 +189,17 @@ export default function App() {
     setMemoryStateMap(prev => new Map(prev).set(state.vocabularyItemId, state));
   };
 
+  const handleUndoAnswer = (vocabularyItemId: string, previous: MemoryState | undefined, eventId: string) => {
+    restoreMemoryState(vocabularyItemId, previous);
+    removeReviewEvent(eventId);
+    setMemoryStateMap(prev => {
+      const next = new Map(prev);
+      if (previous) next.set(vocabularyItemId, previous);
+      else next.delete(vocabularyItemId);
+      return next;
+    });
+  };
+
   const handleSessionEnd = (result: SessionResult) => {
     setActivePlan(null);
     setMemoryStateMap(getMemoryStateMap());
@@ -218,6 +231,7 @@ export default function App() {
         memoryStateMap={memoryStateMap}
         settings={settings}
         onAnswer={handleAnswer}
+        onUndoAnswer={handleUndoAnswer}
         onEnd={handleSessionEnd}
       />
     );

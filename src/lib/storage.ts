@@ -579,6 +579,22 @@ export function saveMemoryState(state: MemoryState): void {
   setJson(getUserScopedKey(STORAGE_KEYS.MEMORY_STATES), states);
 }
 
+/** Undo: puts a word's schedule back to what it was (no state = never studied). */
+export function restoreMemoryState(vocabularyItemId: string, previous: MemoryState | undefined): void {
+  if (previous) return saveMemoryState(previous);
+  setJson(
+    getUserScopedKey(STORAGE_KEYS.MEMORY_STATES),
+    getRawMemoryStates().filter(s => s.vocabularyItemId !== vocabularyItemId)
+  );
+}
+
+export function removeReviewEvent(eventId: string): void {
+  setJson(
+    getUserScopedKey(STORAGE_KEYS.REVIEW_EVENTS),
+    getReviewEvents().filter(e => e.id !== eventId)
+  );
+}
+
 export function getReviewEvents(): ReviewEvent[] {
   return getJson<ReviewEvent[]>(getUserScopedKey(STORAGE_KEYS.REVIEW_EVENTS), []);
 }
