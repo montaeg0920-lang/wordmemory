@@ -25,9 +25,10 @@ async function generateIcons() {
     .toFile(path.resolve(publicDir, 'pwa-512x512.png'));
   console.log('Generated pwa-512x512.png');
 
-  // 3. pwa-maskable-512x512.png (Full-bleed vibrant blue background, safe-zone aligned)
-  // Seamless edge-to-edge vibrant royal blue so Samsung One UI and Android squircle crops without any dark edge
-  await sharp(svgBuffer)
+  // 3. pwa-maskable-512x512.png (full-bleed background; artwork shrunk into the circular safe zone)
+  const maskablePath = path.resolve(publicDir, 'icon-maskable.svg');
+  const maskableBuffer = fs.existsSync(maskablePath) ? fs.readFileSync(maskablePath) : svgBuffer;
+  await sharp(maskableBuffer)
     .resize(512, 512)
     .png()
     .toFile(path.resolve(publicDir, 'pwa-maskable-512x512.png'));

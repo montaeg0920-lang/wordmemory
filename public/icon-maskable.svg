@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <!-- VocaCurve: stacked word cards on the app's paper background; behind them a rising memory curve with review points -->
+  <!-- VocaCurve (maskable, content kept inside the circular safe zone): stacked word cards on the app's paper background; behind them a rising memory curve with review points -->
   <defs>
     <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
       <feDropShadow dx="0" dy="10" stdDeviation="11" flood-color="#1E1C19" flood-opacity="0.16"/>
@@ -14,7 +14,7 @@
     </linearGradient>
   </defs>
   <rect width="512" height="512" fill="#F7F5F0"/>
-  <g transform="translate(256 256) scale(0.9) translate(-256 -256)">
+  <g transform="translate(256 256) scale(0.76) translate(-256 -256)">
     <!-- memory curve (behind the cards) -->
     <path d="M40 250 C 60 208, 84 190, 112 184 C 180 172, 268 162, 330 138 C 380 118, 410 97, 436 72"
           fill="none" stroke="#3D86F0" stroke-width="16" stroke-linecap="round" opacity="0.28" filter="url(#glow)"/>
