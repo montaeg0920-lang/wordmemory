@@ -1,11 +1,9 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
-import { Camera, Check, ClipboardList, FileUp, ImageIcon, Loader2, PenLine, Sparkles, Trash2, X } from 'lucide-react';
+import { Check, ClipboardList, FileUp, Loader2, PenLine, Sparkles, Trash2 } from 'lucide-react';
 import { LanguageCode, UserSettings, VocabularyCollection, VocabularyFolder, VocabularyItem } from '../types/database';
 import { ExtractedWord, analyzeWordWithAI, extractVocabularyFromFile, extractVocabularyFromText, mapWithConcurrency } from '../lib/aiClient';
 import { ParsedImportResult, classifyFile, extractPlainText, parseSpreadsheetData, parseTextContent } from '../lib/fileParser';
-import { describeCameraError, prefersNativeCamera } from '../lib/imageTools';
 import { detectLanguage, getLanguageMeta } from '../lib/languageHelper';
 import { Button, Card, Field, Notice, ScreenHeader, Segmented, Select, Sheet, TermText, inputClass } from './ui';
 
@@ -16,9 +14,11 @@ interface AddWordsScreenProps {
   settings: UserSettings;
   onSave: (items: VocabularyItem[]) => number;
   onSaveCollection: (col: VocabularyCollection) => void;
+  /** First-run trial: opens the paste tab with these sample lines already filled in. */
+  initialPaste?: string | null;
 }
 
-type Tab = 'single' | 'paste' | 'photo' | 'file';
+type Tab = 'single' | 'paste' | 'file';
 
 interface DraftRow {
   key: string;
@@ -45,10 +45,11 @@ export const AddWordsScreen: React.FC<AddWordsScreenProps> = ({
   settings,
   onSave,
   onSaveCollection,
+  initialPaste,
 }) => {
   const [collectionId, setCollectionId] = useState(collections[0]?.id || '');
   const [folderId, setFolderId] = useState('');
-  const [tab, setTab] = useState<Tab>('single');
+  const [tab, setTab] = useState<Tab>(initialPaste ? 'paste' : 'single');
   const [showNewCollection, setShowNewCollection] = useState(false);
   const [newCollectionName, setNewCollectionName] = useState('');
 
@@ -144,6 +145,7 @@ export const AddWordsScreen: React.FC<AddWordsScreenProps> = ({
           <BatchImport
             key={tab}
             mode={tab}
+            initialText={tab === 'paste' ? initialPaste || '' : ''}
             lang={lang}
             existingInCollection={existingInCollection}
             existingTerms={existingTerms}
@@ -189,7 +191,6 @@ export const AddWordsScreen: React.FC<AddWordsScreenProps> = ({
               className={inputClass}
               value={newCollectionName}
               onChange={e => setNewCollectionName(e.target.value)}
-              placeholder="예: 토익 필수 어휘"
             />
           </Field>
         </Sheet>
@@ -202,11 +203,10 @@ const TabBar: React.FC<{ value: Tab; onChange: (t: Tab) => void }> = ({ value, o
   const tabs: { id: Tab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'single', label: '한 단어', icon: PenLine },
     { id: 'paste', label: '붙여넣기', icon: ClipboardList },
-    { id: 'photo', label: '사진 찍기', icon: Camera },
     { id: 'file', label: '파일 넣기', icon: FileUp },
   ];
   return (
-    <div className="grid grid-cols-4 gap-1 p-1 bg-sunken rounded-xl" role="tablist">
+    <div className="grid grid-cols-3 gap-1 p-1 bg-sunken rounded-xl" role="tablist">
       {tabs.map(({ id, label, icon: Icon }) => (
         <button
           key={id}
@@ -292,7 +292,6 @@ const SingleWordForm: React.FC<{
             ref={termRef}
             autoFocus
             className={`${inputClass} font-serif text-[17px]`}
-            placeholder={getLanguageMeta(lang).sampleTerm}
             value={row.term}
             autoCapitalize="none"
             autoCorrect="off"
@@ -317,7 +316,6 @@ const SingleWordForm: React.FC<{
       <Field label="뜻" hint="뜻을 비워 두고 Enter를 누르면 AI가 채워 줍니다.">
         <input
           className={inputClass}
-          placeholder={getLanguageMeta(lang).sampleMeaning}
           value={row.meaning}
           onChange={e => setRow({ ...row, meaning: e.target.value })}
           onKeyDown={e => e.key === 'Enter' && save()}
@@ -363,7 +361,7 @@ const SingleWordForm: React.FC<{
   );
 };
 
-/* ============================ Batch (paste / photo / file) ============================ */
+/* ============================ Batch (paste / file) ============================ */
 
 interface BatchSourceResult {
   words: ExtractedWord[];
@@ -426,12 +424,13 @@ function localResultLooksWeak(words: ExtractedWord[], text: string, lang: string
 
 const BatchImport: React.FC<{
   mode: Exclude<Tab, 'single'>;
+  initialText: string;
   lang: string;
   existingInCollection: VocabularyItem[];
   existingTerms: Set<string>;
   onSave: (rows: DraftRow[]) => number;
-}> = ({ mode, lang, existingInCollection, existingTerms, onSave }) => {
-  const [text, setText] = useState('');
+}> = ({ mode, initialText, lang, existingInCollection, existingTerms, onSave }) => {
+  const [text, setText] = useState(initialText);
   const [rows, setRows] = useState<DraftRow[] | null>(null);
   const [source, setSource] = useState('');
   const [localTexts, setLocalTexts] = useState<string[]>([]);
@@ -440,12 +439,7 @@ const BatchImport: React.FC<{
   const [done, setDone] = useState<string | null>(null);
   const [enrich, setEnrich] = useState(true);
   const [dragging, setDragging] = useState(false);
-  const [liveCamera, setLiveCamera] = useState(false);
-  const cameraRef = useRef<HTMLInputElement>(null);
-  const galleryRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const nativeCamera = prefersNativeCamera();
-  const langName = getLanguageMeta(lang).name;
 
   const showRows = (list: DraftRow[], label: string) => {
     setSource(label);
@@ -591,7 +585,7 @@ const BatchImport: React.FC<{
   const includedCount = rows?.filter(r => r.include).length ?? 0;
   const resetInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    e.target.value = ''; // allow choosing the same photo again after an error
+    e.target.value = ''; // allow choosing the same file again after an error
     handleFiles(files);
   };
 
@@ -612,9 +606,11 @@ const BatchImport: React.FC<{
         <>
           {mode === 'paste' && (
             <>
+              {initialText && text === initialText && (
+                <Notice>체험용 예시 단어가 들어 있어요. "단어 찾기"를 누르고, 확인한 뒤 저장해 보세요.</Notice>
+              )}
               <textarea
                 className={`${inputClass} h-48 py-3 leading-relaxed`}
-                placeholder={'한 줄에 하나씩 붙여넣으세요\n\nderive - 유래하다\nmitigate  완화하다\n3. subtle : 미묘한'}
                 value={text}
                 onChange={e => setText(e.target.value)}
               />
@@ -641,25 +637,6 @@ const BatchImport: React.FC<{
               </Button>
               <p className="text-[13px] text-muted">어떤 모양으로 적혀 있어도 괜찮아요. 깔끔한 목록은 바로, 복잡한 글은 AI가 골라 냅니다.</p>
             </>
-          )}
-
-          {mode === 'photo' && (
-            <Card className="p-5 text-center">
-              <p className="text-[15px] text-ink-2 leading-relaxed">
-                교재·단어 시험지·칠판을 찍으면 AI가 {langName} 단어와 뜻을 찾아 줍니다. 저장 전에 직접 확인할 수 있어요.
-              </p>
-              <div className="grid grid-cols-2 gap-2 mt-5">
-                <Button variant="primary" onClick={() => (nativeCamera ? cameraRef.current?.click() : setLiveCamera(true))}>
-                  <Camera className="w-4 h-4" /> 사진 찍기
-                </Button>
-                <Button onClick={() => galleryRef.current?.click()}>
-                  <ImageIcon className="w-4 h-4" /> 앨범에서
-                </Button>
-              </div>
-              <p className="text-[12px] text-muted mt-3">글자가 화면에 꽉 차게, 밝은 곳에서 찍으면 더 정확해요. 여러 장도 한 번에 고를 수 있어요.</p>
-              <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={resetInput} />
-              <input ref={galleryRef} type="file" accept="image/*" multiple className="hidden" onChange={resetInput} />
-            </Card>
           )}
 
           {mode === 'file' && (
@@ -767,105 +744,6 @@ const BatchImport: React.FC<{
           </Button>
         </>
       )}
-
-      {liveCamera && (
-        <LiveCameraSheet
-          onClose={() => setLiveCamera(false)}
-          onCapture={file => {
-            setLiveCamera(false);
-            handleFiles([file]);
-          }}
-          onFallback={() => {
-            setLiveCamera(false);
-            galleryRef.current?.click();
-          }}
-        />
-      )}
     </div>
-  );
-};
-
-/** In-app camera for computers/tablets without a native camera picker. */
-const LiveCameraSheet: React.FC<{ onClose: () => void; onCapture: (file: File) => void; onFallback: () => void }> = ({
-  onClose,
-  onCapture,
-  onFallback,
-}) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [ready, setReady] = useState(false);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        if (!navigator.mediaDevices?.getUserMedia) throw Object.assign(new Error('no api'), { name: 'NotFoundError' });
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-          audio: false,
-        });
-        if (cancelled) return stream.getTracks().forEach(t => t.stop());
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => undefined);
-          setReady(true);
-        }
-      } catch (e) {
-        setError(describeCameraError(e).message);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      streamRef.current?.getTracks().forEach(t => t.stop());
-    };
-  }, []);
-
-  const capture = () => {
-    const video = videoRef.current;
-    if (!video || !video.videoWidth) return;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d')?.drawImage(video, 0, 0);
-    canvas.toBlob(
-      b => b && onCapture(new File([b], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' })),
-      'image/jpeg',
-      0.9
-    );
-  };
-
-  return createPortal(
-    <div className="fixed inset-0 z-50 bg-black flex flex-col" role="dialog" aria-modal="true" aria-label="카메라">
-      <div className="flex justify-end p-3 safe-top">
-        <button onClick={onClose} className="p-2 rounded-full text-white/80 hover:bg-white/10" aria-label="닫기">
-          <X className="w-6 h-6" />
-        </button>
-      </div>
-      <div className="flex-1 flex items-center justify-center px-4">
-        {error ? (
-          <div className="max-w-sm text-center text-white">
-            <p className="text-[15px] leading-relaxed">{error}</p>
-            <button onClick={onFallback} className="mt-5 h-11 px-5 rounded-xl bg-white text-black font-semibold">
-              앨범에서 고르기
-            </button>
-          </div>
-        ) : (
-          <video ref={videoRef} playsInline muted className="max-h-full max-w-full rounded-xl" />
-        )}
-      </div>
-      {!error && (
-        <div className="flex justify-center py-6 safe-bottom">
-          <button
-            onClick={capture}
-            disabled={!ready}
-            className="w-[72px] h-[72px] rounded-full border-4 border-white bg-white/20 disabled:opacity-40"
-            aria-label="찍기"
-          />
-        </div>
-      )}
-    </div>,
-    document.body
   );
 };

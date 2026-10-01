@@ -56,8 +56,8 @@ export const StatsScreen: React.FC<StatsScreenProps> = ({ stats }) => {
             ))}
           </ul>
           <p className="text-[12px] text-muted mt-4 leading-relaxed">
-            익히는 중: 아직 짧은 간격으로 반복하는 단어 · 기억 중: 며칠~몇 주 간격으로 넘어간 단어 · 장기 기억: 다음 복습이 3주 이상
-            뒤인 단어
+            기억이 유지되는 기간(기억할 확률이 90%로 떨어지기까지)이 익히는 중: 1주 미만 · 기억 중: 1~3주 · 장기 기억: 3주
+            이상인 단어
           </p>
         </Card>
       </section>
@@ -82,7 +82,7 @@ export const StatsScreen: React.FC<StatsScreenProps> = ({ stats }) => {
       </section>
 
       <p className="text-[12px] text-muted mt-6 px-1 leading-relaxed">
-        기억률은 각 단어의 복습 결과로 추정한 망각곡선(반감기 모델) 값입니다. 정확한 시험 점수가 아니라 복습 시점을 정하는 기준입니다.
+        기억률은 각 단어의 복습 기록으로 추정한 값입니다(FSRS 기억 모델). 단어마다 난이도와 기억 안정도를 따로 계산합니다. 정확한 시험 점수가 아니라 복습 시점을 정하는 기준입니다.
       </p>
     </div>
   );

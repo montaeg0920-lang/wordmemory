@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Lightbulb, Volume2, VolumeX, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Lightbulb, Volume2, VolumeX, X } from 'lucide-react';
 import { ConfidenceRating, MemoryState, ReviewEvent, UserSettings, VocabularyItem } from '../types/database';
 import { SessionPlan, createDefaultMemoryState, formatInterval, processReviewResult } from '../lib/memoryEngine';
 import { playSuccessSound, playWrongSound, speakEnglishWord } from '../lib/sound';
@@ -30,7 +30,21 @@ interface ReviewScreenProps {
   memoryStateMap: Map<string, MemoryState>;
   settings: UserSettings;
   onAnswer: (state: MemoryState, event: ReviewEvent) => void;
+  /** "이전": puts the word's schedule back and deletes the logged answer. */
+  onUndoAnswer: (vocabularyItemId: string, previous: MemoryState | undefined, eventId: string) => void;
   onEnd: (result: SessionResult) => void;
+}
+
+/** Everything needed to step back to the card before an answer or a pass. */
+interface Step {
+  index: number;
+  queue: QueueCard[];
+  firstAnswers: Map<string, Rating>;
+  struggled: Set<string>;
+  firstAnswersSaved: Set<string>;
+  passed: Set<string>;
+  /** Set when that answer changed the schedule. */
+  scheduled?: { itemId: string; previous: MemoryState | undefined; eventId: string };
 }
 
 interface QueueCard {
@@ -47,7 +61,7 @@ const RATINGS: { id: Rating; label: string; key: string; tone: string }[] = [
   { id: 'know_well', label: '알아요', key: '3', tone: 'text-good border-good/40 hover:bg-good-soft' },
 ];
 
-export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap, settings, onAnswer, onEnd }) => {
+export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap, settings, onAnswer, onUndoAnswer, onEnd }) => {
   const direction = plan.direction;
   const [queue, setQueue] = useState<QueueCard[]>(() => plan.items.map(item => ({ item, repeat: 0 })));
   const [index, setIndex] = useState(0);
@@ -60,6 +74,9 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap
   const firstAnswers = useRef(new Map<string, Rating>());
   const struggled = useRef(new Set<string>());
   const firstAnswersSaved = useRef(new Set<string>());
+  /** Words passed with "넘기기" (not answered, schedule unchanged). */
+  const passed = useRef(new Set<string>());
+  const [history, setHistory] = useState<Step[]>([]);
 
   const card = queue[index];
   const item = card?.item;
@@ -67,7 +84,8 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap
   const isRepeat = !!card && card.repeat > 0;
   const affectsSchedule = !plan.practice && !isRepeat;
   const firstTotal = plan.items.length;
-  const doneFirst = Math.min(firstTotal, firstAnswers.current.size);
+  const handled = new Set([...firstAnswers.current.keys(), ...passed.current]);
+  const doneFirst = Math.min(firstTotal, handled.size);
 
   const speak = useCallback(
     (text?: string) => {
@@ -114,9 +132,52 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap
     return out;
   }, [item, affectsSchedule, memoryStateMap, settings.userId]);
 
+  const snapshot = (): Step => ({
+    index,
+    queue,
+    firstAnswers: new Map(firstAnswers.current),
+    struggled: new Set(struggled.current),
+    firstAnswersSaved: new Set(firstAnswersSaved.current),
+    passed: new Set(passed.current),
+  });
+
+  const goTo = (nextIndex: number, nextQueue: QueueCard[]) => {
+    if (nextIndex < nextQueue.length) setIndex(nextIndex);
+    else onEnd(result());
+  };
+
+  /** "넘기기": move on without answering; the word keeps its schedule. */
+  const pass = () => {
+    if (!item) return;
+    const step = snapshot();
+    setHistory(h => [...h, step]);
+    if (!firstAnswers.current.has(item.id)) passed.current.add(item.id);
+    setToast('넘겼어요');
+    goTo(index + 1, queue);
+  };
+
+  /** "이전": back to the previous card; an answer given there is undone so it can be answered again. */
+  const goBack = () => {
+    const step = history[history.length - 1];
+    if (!step) return;
+    if (step.scheduled) onUndoAnswer(step.scheduled.itemId, step.scheduled.previous, step.scheduled.eventId);
+    firstAnswers.current = step.firstAnswers;
+    struggled.current = step.struggled;
+    firstAnswersSaved.current = step.firstAnswersSaved;
+    passed.current = step.passed;
+    setHistory(h => h.slice(0, -1));
+    setQueue(step.queue);
+    setIndex(step.index);
+    setFlipped(false);
+    setHint(false);
+    shownAt.current = performance.now();
+    setToast(step.scheduled ? '이전 답을 취소했어요' : null);
+  };
+
   const rate = (rating: Rating) => {
     if (!item || !flipped) return;
     const responseTimeMs = Math.round(performance.now() - shownAt.current);
+    const step = snapshot();
 
     if (settings.soundEffects) {
       if (rating === 'know_well') playSuccessSound();
@@ -148,10 +209,14 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap
         recallProbabilityAfter: evaluation.updatedState.estimatedRecallProbability || 0,
       };
       onAnswer(evaluation.updatedState, event);
+      step.scheduled = { itemId: item.id, previous: memoryStateMap.get(item.id), eventId: event.id };
       setToast(`다음 복습: ${formatInterval(evaluation.intervalMinutes)}`);
     } else {
       setToast(rating === 'know_well' ? null : '이 세션 안에서 한 번 더 나옵니다');
     }
+
+    passed.current.delete(item.id);
+    setHistory(h => [...h, step]);
 
     // Build the next queue synchronously so the "last card" case is handled correctly.
     let nextQueue = queue;
@@ -161,14 +226,10 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap
       setQueue(nextQueue);
     }
 
-    if (index + 1 < nextQueue.length) {
-      setIndex(index + 1);
-    } else {
-      onEnd(result());
-    }
+    goTo(index + 1, nextQueue);
   };
 
-  // Keyboard shortcuts (desktop): Space/Enter = flip, 1·2·3 = answer, R = listen
+  // Keyboard shortcuts (desktop): Space/Enter = flip, 1·2·3 = answer, ←/→ = 이전/넘기기, R = listen
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
@@ -177,6 +238,10 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap
         setFlipped(f => !f);
       } else if (flipped && (e.key === '1' || e.key === '2' || e.key === '3')) {
         rate(RATINGS[Number(e.key) - 1].id);
+      } else if (e.key === 'ArrowLeft') {
+        goBack();
+      } else if (e.key === 'ArrowRight') {
+        pass();
       } else if (e.key === 'r' || e.key === 'R') {
         speak(item?.term);
       } else if (e.key === 'Escape') {
@@ -336,8 +401,25 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({ plan, memoryStateMap
             )}
           </div>
 
-          <div className="h-8 flex items-center justify-center">
-            {toast && <p className="text-[13px] text-muted vc-enter">{toast}</p>}
+          <div className="h-11 flex items-center justify-between gap-2">
+            <button
+              onClick={goBack}
+              disabled={history.length === 0}
+              className="h-9 pl-1.5 pr-3 rounded-full inline-flex items-center gap-0.5 text-sm text-muted hover:bg-sunken disabled:opacity-30 disabled:hover:bg-transparent"
+              aria-label="이전 카드"
+            >
+              <ChevronLeft className="w-4 h-4" /> 이전
+            </button>
+            <p className="flex-1 min-w-0 text-center text-[13px] text-muted truncate" aria-live="polite">
+              {toast}
+            </p>
+            <button
+              onClick={pass}
+              className="h-9 pl-3 pr-1.5 rounded-full inline-flex items-center gap-0.5 text-sm text-muted hover:bg-sunken"
+              aria-label="이 카드 넘기기"
+            >
+              넘기기 <ChevronRight className="w-4 h-4" />
+            </button>
           </div>
 
           {/* Answer area */}

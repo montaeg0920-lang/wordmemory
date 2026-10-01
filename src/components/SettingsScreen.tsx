@@ -1,39 +1,35 @@
 import React, { useRef, useState } from 'react';
-import { ChevronRight, Download, Upload } from 'lucide-react';
+import { BookOpen, ChevronRight, Download, Upload } from 'lucide-react';
 import { UserProfile, UserSettings } from '../types/database';
 import { clearAllWords, exportUserDataAsJson, importUserDataFromJson } from '../lib/storage';
 import { getLanguageMeta } from '../lib/languageHelper';
 import { usePWAInstall } from '../hooks/usePWAInstall';
-import { StarterDeck } from '../data/starterDecks';
-import { StarterWord } from '../lib/aiClient';
-import { StarterDeckPicker } from './StarterDeckPicker';
-import { Button, Card, Notice, ScreenHeader, SectionLabel, Segmented, Sheet, Toggle } from './ui';
+import { Button, Card, Notice, ScreenHeader, SectionLabel, Segmented, Toggle, inputClass } from './ui';
 
 interface SettingsScreenProps {
   settings: UserSettings;
   activeProfile: UserProfile;
   onOpenProfileModal: () => void;
   onUpdateSettings: (partial: Partial<UserSettings>) => void;
-  onImportDeck: (deck: StarterDeck) => void;
-  onImportGenerated: (title: string, words: StarterWord[]) => void;
+  onOpenGuide: () => void;
   onDataChanged: () => void;
 }
 
-const NEW_WORD_OPTIONS = [5, 10, 15, 20, 30];
+/** The slider covers 0–100; learners who want more type the number themselves. */
+const SLIDER_MAX_NEW_WORDS = 100;
+const MAX_NEW_WORDS = 9999;
 
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   settings,
   activeProfile,
   onOpenProfileModal,
   onUpdateSettings,
-  onImportDeck,
-  onImportGenerated,
+  onOpenGuide,
   onDataChanged,
 }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const fileRef = useRef<HTMLInputElement>(null);
   const [message, setMessage] = useState<{ tone: 'good' | 'bad'; text: string } | null>(null);
-  const [showDecks, setShowDecks] = useState(false);
   const lang = getLanguageMeta(activeProfile.targetLanguage);
   const dailyNew = settings.dailyNewWords ?? 10;
 
@@ -88,11 +84,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         <p className="text-[13px] text-muted mt-0.5 mb-3">
           복습할 단어는 양과 상관없이 모두 나옵니다. 새 단어만 하루에 이만큼씩 섞입니다. 처음에는 10개를 권합니다.
         </p>
-        <Segmented<number>
-          value={dailyNew}
-          onChange={v => onUpdateSettings({ dailyNewWords: v })}
-          options={NEW_WORD_OPTIONS.map(n => ({ value: n, label: `${n}개` }))}
-        />
+        <DailyNewWordsInput value={dailyNew} onChange={v => onUpdateSettings({ dailyNewWords: v })} />
       </Card>
 
       <SectionLabel>소리</SectionLabel>
@@ -119,11 +111,15 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         />
       </Card>
 
+      <SectionLabel>도움말</SectionLabel>
+      <Card className="mb-8">
+        <RowButton onClick={onOpenGuide} icon={<BookOpen className="w-5 h-5" />} label="이용 가이드 다시 보기" />
+      </Card>
+
       <SectionLabel>데이터</SectionLabel>
       <Card className="mb-2 divide-y divide-line">
         <RowButton onClick={downloadBackup} icon={<Download className="w-5 h-5" />} label="백업 파일 받기" />
         <RowButton onClick={() => fileRef.current?.click()} icon={<Upload className="w-5 h-5" />} label="백업 파일로 복원" />
-        <RowButton onClick={() => setShowDecks(true)} label={`${lang.name} 기본 단어장 불러오기`} />
       </Card>
       <p className="text-[12px] text-muted px-1 mb-8 leading-relaxed">
         단어와 기록은 이 기기의 브라우저에만 저장됩니다. 브라우저 데이터를 지우거나 기기를 바꾸면 사라지므로, 가끔 백업 파일을 받아 두세요.
@@ -170,22 +166,54 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </button>
       </Card>
 
-      {showDecks && (
-        <Sheet title={`${lang.name} 기본 단어장`} onClose={() => setShowDecks(false)}>
-          <p className="text-[14px] text-ink-2 mb-3">{lang.name} 단어장만 보입니다. 새 단어로 추가되며, 이미 있는 단어는 건너뜁니다.</p>
-          <StarterDeckPicker
-            language={activeProfile.targetLanguage}
-            onImportDeck={deck => {
-              onImportDeck(deck);
-              setShowDecks(false);
-            }}
-            onImportGenerated={(title, words) => {
-              onImportGenerated(title, words);
-              setShowDecks(false);
-            }}
+    </div>
+  );
+};
+
+const DailyNewWordsInput: React.FC<{ value: number; onChange: (v: number) => void }> = ({ value, onChange }) => {
+  const [draft, setDraft] = useState(String(value));
+  React.useEffect(() => setDraft(String(value)), [value]);
+
+  const commit = () => {
+    const n = Math.round(Number(draft));
+    if (draft.trim() === '' || !Number.isFinite(n)) return setDraft(String(value));
+    const clamped = Math.max(0, Math.min(MAX_NEW_WORDS, n));
+    setDraft(String(clamped));
+    if (clamped !== value) onChange(clamped);
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-3">
+        <input
+          type="range"
+          min={0}
+          max={SLIDER_MAX_NEW_WORDS}
+          step={1}
+          value={Math.min(value, SLIDER_MAX_NEW_WORDS)}
+          onChange={e => onChange(Number(e.target.value))}
+          className="flex-1 accent-[var(--accent)]"
+          aria-label="하루 새 단어 수"
+        />
+        <div className="flex items-center gap-1.5 shrink-0">
+          <input
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={MAX_NEW_WORDS}
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            onBlur={commit}
+            onKeyDown={e => e.key === 'Enter' && (e.currentTarget as HTMLInputElement).blur()}
+            className={`${inputClass} w-20 text-right tabular-nums`}
+            aria-label="하루 새 단어 수 직접 입력"
           />
-        </Sheet>
-      )}
+          <span className="text-[15px] text-ink-2">개</span>
+        </div>
+      </div>
+      <p className="text-[12px] text-muted mt-2">
+        0개로 두면 새 단어 없이 복습만 합니다. 100개보다 더 하고 싶으면 숫자를 직접 적어 주세요.
+      </p>
     </div>
   );
 };

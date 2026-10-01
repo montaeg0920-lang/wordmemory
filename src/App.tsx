@@ -9,10 +9,13 @@ import { StatsScreen } from './components/StatsScreen';
 import { SettingsScreen } from './components/SettingsScreen';
 import { UserProfileModal } from './components/UserProfileModal';
 import { WelcomeOnboardingModal } from './components/WelcomeOnboardingModal';
+import { UsageGuide } from './components/UsageGuide';
+import { getTrialPasteText } from './data/trialWords';
 import { Notice } from './components/ui';
 import {
   STORAGE_ERROR_EVENT,
   completeOnboarding,
+  endTrialOffer,
   createProfile,
   deleteCollection,
   deleteFolder,
@@ -27,9 +30,11 @@ import {
   getUserSettings,
   getVocabularyItems,
   hasCompletedOnboarding,
-  importStarterDeck,
+  isTrialOfferActive,
   initializeStorageIfNeeded,
   logReviewEvent,
+  removeReviewEvent,
+  restoreMemoryState,
   moveItemsToFolder,
   requestPersistentStorage,
   saveCollection,
@@ -52,8 +57,6 @@ import {
   VocabularyItem,
 } from './types/database';
 import { EMPTY_REASON_MESSAGE, SessionOptions, SessionPlan, generateSessionPlan } from './lib/memoryEngine';
-import { StarterDeck } from './data/starterDecks';
-import { StarterWord } from './lib/aiClient';
 
 initializeStorageIfNeeded();
 
@@ -82,6 +85,10 @@ export default function App() {
   const [activeProfile, setActiveProfile] = useState<UserProfile>(getActiveProfile);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(!hasCompletedOnboarding());
+  const [showGuide, setShowGuide] = useState(false);
+  const [trialOffer, setTrialOffer] = useState(isTrialOfferActive);
+  /** Sample words pre-filled into the paste box when the learner starts the trial. */
+  const [trialPaste, setTrialPaste] = useState<string | null>(null);
 
   const [activePlan, setActivePlan] = useState<SessionPlan | null>(null);
   const [lastPlanOptions, setLastPlanOptions] = useState<SessionOptions>({});
@@ -151,7 +158,16 @@ export default function App() {
   const handleCompleteOnboarding = (name: string, lang: LanguageCode) => {
     completeOnboarding(name, lang);
     setShowOnboarding(false);
+    setTrialOffer(isTrialOfferActive());
+    setShowGuide(true);
     reloadData();
+  };
+  const trialText = trialOffer ? getTrialPasteText(activeProfile.targetLanguage) : null;
+  const startTrial = () => {
+    if (!trialText) return;
+    setShowGuide(false);
+    setTrialPaste(trialText);
+    setCurrentTab('import');
   };
 
   /* ---------- sessions ---------- */
@@ -173,6 +189,17 @@ export default function App() {
     setMemoryStateMap(prev => new Map(prev).set(state.vocabularyItemId, state));
   };
 
+  const handleUndoAnswer = (vocabularyItemId: string, previous: MemoryState | undefined, eventId: string) => {
+    restoreMemoryState(vocabularyItemId, previous);
+    removeReviewEvent(eventId);
+    setMemoryStateMap(prev => {
+      const next = new Map(prev);
+      if (previous) next.set(vocabularyItemId, previous);
+      else next.delete(vocabularyItemId);
+      return next;
+    });
+  };
+
   const handleSessionEnd = (result: SessionResult) => {
     setActivePlan(null);
     setMemoryStateMap(getMemoryStateMap());
@@ -183,56 +210,14 @@ export default function App() {
   /* ---------- words ---------- */
   const handleSaveItems = (newItems: VocabularyItem[]) => {
     const saved = saveVocabularyItems(newItems);
+    if (saved > 0 && trialOffer) {
+      endTrialOffer();
+      setTrialOffer(false);
+      setTrialPaste(null);
+    }
     reloadData();
     return saved;
   };
-  const handleImportGenerated = (title: string, words: StarterWord[]) => {
-    const now = Date.now();
-    const lang = activeProfile.targetLanguage;
-    const collection: VocabularyCollection = {
-      id: `col_ai_${now}`,
-      name: title,
-      sourceLanguage: lang,
-      targetLanguage: 'ko',
-      createdAt: now,
-      updatedAt: now,
-      color: '#2B4C7E',
-    };
-    saveCollection(collection);
-    const added = saveVocabularyItems(
-      words.map((w, i) => ({
-        id: `vocab_${now}_${i}_${Math.random().toString(36).slice(2, 6)}`,
-        collectionId: collection.id,
-        sourceLanguage: lang,
-        targetLanguage: 'ko',
-        term: w.term,
-        lemma: w.term.toLowerCase(),
-        userMeaning: w.meaning,
-        partOfSpeech: w.partOfSpeech || undefined,
-        pronunciation: w.pronunciation || undefined,
-        exampleSentences: w.exampleEn
-          ? [{ id: `ex_${now}_${i}`, source: 'ai' as const, en: w.exampleEn, ko: w.exampleKo || '', clozeBlank: w.term }]
-          : [],
-        createdAt: now + i,
-        updatedAt: now,
-      }))
-    );
-    reloadData();
-    setNotice(`'${title}' ${added}개 단어를 불러왔습니다. 하루 ${settings.dailyNewWords ?? 10}개씩 새 단어로 나옵니다.`);
-    setCurrentTab('home');
-  };
-
-  const handleImportDeck = (deck: StarterDeck) => {
-    if (deck.language !== activeProfile.targetLanguage) {
-      setNotice('지금 학습 중인 언어의 단어장만 불러올 수 있습니다.');
-      return;
-    }
-    const added = importStarterDeck(deck);
-    reloadData();
-    setNotice(`'${deck.title}'에서 ${added}개 단어를 불러왔습니다. 하루 ${settings.dailyNewWords ?? 10}개씩 새 단어로 나옵니다.`);
-    setCurrentTab('home');
-  };
-
   const handleUpdateSettings = (partial: Partial<UserSettings>) => {
     setSettings(updateUserSettings(partial));
     if (partial.userName || partial.sourceLanguage) reloadData();
@@ -246,6 +231,7 @@ export default function App() {
         memoryStateMap={memoryStateMap}
         settings={settings}
         onAnswer={handleAnswer}
+        onUndoAnswer={handleUndoAnswer}
         onEnd={handleSessionEnd}
       />
     );
@@ -302,8 +288,7 @@ export default function App() {
               setLibraryCollectionId(id);
               setCurrentTab('library');
             }}
-            onImportDeck={handleImportDeck}
-            onImportGenerated={handleImportGenerated}
+            onTrial={trialText ? startTrial : undefined}
           />
         )}
 
@@ -356,6 +341,7 @@ export default function App() {
             existingItems={items}
             settings={settings}
             onSave={handleSaveItems}
+            initialPaste={trialPaste}
             onSaveCollection={col => {
               saveCollection(col);
               reloadData();
@@ -371,8 +357,7 @@ export default function App() {
             activeProfile={activeProfile}
             onOpenProfileModal={() => setShowProfileModal(true)}
             onUpdateSettings={handleUpdateSettings}
-            onImportDeck={handleImportDeck}
-            onImportGenerated={handleImportGenerated}
+            onOpenGuide={() => setShowGuide(true)}
             onDataChanged={reloadData}
           />
         )}
@@ -396,6 +381,10 @@ export default function App() {
           initialLanguage={activeProfile.targetLanguage || 'en'}
           onComplete={handleCompleteOnboarding}
         />
+      )}
+
+      {showGuide && !showOnboarding && (
+        <UsageGuide canTry={!!trialText && items.length === 0} onTry={startTrial} onClose={() => setShowGuide(false)} />
       )}
 
       <Navbar currentTab={currentTab} onTabChange={setCurrentTab} />

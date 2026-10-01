@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { Loader2, Sparkles, Trash2, Volume2 } from 'lucide-react';
 import { MemoryState, VocabularyFolder, VocabularyItem } from '../types/database';
-import { MS_PER_DAY, calculateHlrRecall } from '../lib/scienceScheduler';
-import { formatDueAt, getMemoryView } from '../lib/memoryEngine';
+import { DESIRED_RETENTION, MS_PER_DAY, formatDueAt, getMemoryView, predictRecall } from '../lib/memoryEngine';
 import { speakEnglishWord } from '../lib/sound';
 import { analyzeWordWithAI } from '../lib/aiClient';
 import { Button, Field, Notice, Select, Sheet, StatusTag, TermText, inputClass } from './ui';
@@ -183,9 +182,9 @@ export const WordDetailModal: React.FC<WordDetailModalProps> = ({ item, memorySt
                 <p className="text-[15px] mt-3">
                   지금 기억하고 있을 확률 <strong className="font-semibold tabular-nums">{Math.round(view.retention * 100)}%</strong>
                 </p>
-                <RetentionCurve halfLife={view.science.halfLife} lastReviewAt={view.science.lastReviewAt!} nextDueAt={view.nextDueAt} />
+                <RetentionCurve stability={view.stability} lastReviewAt={view.lastReviewAt!} nextDueAt={view.nextDueAt} />
                 <p className="text-[12px] text-muted mt-1">
-                  {view.reviewCount}번 복습 · 망각곡선(반감기 {formatHalfLife(view.science.halfLife)}) 기준 추정치
+                  {view.reviewCount}번 복습 · 기억 안정도 {formatDays(view.stability)} (기억할 확률이 90%로 떨어지기까지 걸리는 기간) 기준 추정치
                 </p>
               </>
             ) : (
@@ -240,15 +239,15 @@ export const WordDetailModal: React.FC<WordDetailModalProps> = ({ item, memorySt
   );
 };
 
-function formatHalfLife(days: number): string {
+function formatDays(days: number): string {
   if (days < 1) return `${Math.max(1, Math.round(days * 24))}시간`;
   if (days < 60) return `${Math.round(days)}일`;
   return `${Math.round(days / 30)}개월`;
 }
 
 /** Predicted recall from the last review up to (and a bit past) the next review. */
-const RetentionCurve: React.FC<{ halfLife: number; lastReviewAt: number; nextDueAt: number | null }> = ({
-  halfLife,
+const RetentionCurve: React.FC<{ stability: number; lastReviewAt: number; nextDueAt: number | null }> = ({
+  stability,
   lastReviewAt,
   nextDueAt,
 }) => {
@@ -262,12 +261,12 @@ const RetentionCurve: React.FC<{ halfLife: number; lastReviewAt: number; nextDue
   const points: string[] = [];
   for (let i = 0; i <= 40; i++) {
     const t = lastReviewAt + (spanMs * i) / 40;
-    points.push(`${x(t).toFixed(1)},${y(calculateHlrRecall((t - lastReviewAt) / MS_PER_DAY, halfLife)).toFixed(1)}`);
+    points.push(`${x(t).toFixed(1)},${y(predictRecall((t - lastReviewAt) / MS_PER_DAY, stability)).toFixed(1)}`);
   }
-  const nowP = calculateHlrRecall((now - lastReviewAt) / MS_PER_DAY, halfLife);
+  const nowP = predictRecall((now - lastReviewAt) / MS_PER_DAY, stability);
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-24 mt-3" role="img" aria-label="이 단어의 예상 망각곡선">
-      <line x1={pad} x2={W - pad} y1={y(0.85)} y2={y(0.85)} stroke="var(--line-strong)" strokeDasharray="3 4" />
+      <line x1={pad} x2={W - pad} y1={y(DESIRED_RETENTION)} y2={y(DESIRED_RETENTION)} stroke="var(--line-strong)" strokeDasharray="3 4" />
       <polyline points={points.join(' ')} fill="none" stroke="var(--accent)" strokeWidth="2" />
       {nextDueAt && nextDueAt > lastReviewAt && (
         <line x1={x(nextDueAt)} x2={x(nextDueAt)} y1={pad} y2={H - pad} stroke="var(--line-strong)" />

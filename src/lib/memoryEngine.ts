@@ -1,36 +1,47 @@
 /**
  * VocaCurve memory engine (single source of truth).
  *
- * All scheduling AND everything shown on screen (status, retention %, due counts)
- * is derived from the half-life scheduler in ./scienceScheduler. The old
- * "strength/stability" fields on MemoryState are kept only for backward-compatible
- * storage and are no longer used for any calculation.
+ * Scheduling and everything shown on screen (status, retention %, due counts)
+ * comes from FSRS (Free Spaced Repetition Scheduler, via ts-fsrs). Each word has
+ * its own difficulty (D) and stability (S); the predicted recall right now (R)
+ * follows FSRS's forgetting curve. A word is due when R is about to drop to 90%.
+ *
+ * Older fields on MemoryState (strength/halfLife/phase…) are kept only so old
+ * data still loads; they are not used for any calculation.
  */
 
+import { Card, Grade, Rating, State, createEmptyCard, fsrs } from 'ts-fsrs';
 import {
   ConfidenceRating,
   MemoryState,
   MemoryStatus,
+  ReviewEvent,
   StudyDirection,
   UserSettings,
   VocabularyItem,
 } from '../types/database';
-import {
-  MS_PER_DAY,
-  SCIENCE_CONFIG,
-  ScienceMemoryFields,
-  UserResponseCode,
-  calculateHlrInterval,
-  calculateHlrRecall,
-  calculateSciencePriority,
-  migrateOrHydrateScienceState,
-  processScienceReview,
-} from './scienceScheduler';
 
-/** A word counts as "장기 기억" once its next interval is about 3 weeks or more. */
-export const MASTERED_HALF_LIFE_DAYS = 90;
+export const MS_PER_DAY = 86400000;
+/** FSRS schedules a review when predicted recall falls to this level. */
+export const DESIRED_RETENTION = 0.9;
+/** Stability (days until recall drops to 90%) at which a word counts as "기억 중" / "장기 기억". */
+export const RETAINING_STABILITY_DAYS = 7;
+export const MASTERED_STABILITY_DAYS = 21;
 export const DEFAULT_DAILY_NEW_WORDS = 10;
 export const MAX_CARDS_PER_SESSION = 50;
+
+/**
+ * Short-term (same-day) steps are off: the review screen already repeats missed
+ * words within the session, and only the first answer of a session is scheduled.
+ */
+const scheduler = fsrs({
+  request_retention: DESIRED_RETENTION,
+  maximum_interval: 365, // see every word at least once a year
+  enable_fuzz: false,
+  enable_short_term: false,
+  learning_steps: [],
+  relearning_steps: [],
+});
 
 export const STATUS_LABEL: Record<MemoryStatus, string> = {
   new: '새 단어',
@@ -46,7 +57,11 @@ export interface MemoryView {
   isDue: boolean;
   nextDueAt: number | null;
   reviewCount: number;
-  science: ScienceMemoryFields;
+  /** FSRS stability in days (time until recall drops to 90%). 0 for new words. */
+  stability: number;
+  /** FSRS difficulty 1 (easy) .. 10 (hard). */
+  difficulty: number;
+  lastReviewAt: number | null;
 }
 
 export function startOfToday(now: number = Date.now()): number {
@@ -64,11 +79,11 @@ export function createDefaultMemoryState(
     id: `mem_${vocabularyItemId}`,
     userId,
     vocabularyItemId,
-    recognitionStability: 1.0,
-    productionStability: 0.6,
-    sentenceStability: 0.8,
-    transferStability: 0.8,
-    difficulty: 1.0,
+    recognitionStability: 0,
+    productionStability: 0,
+    sentenceStability: 0,
+    transferStability: 0,
+    difficulty: 0,
     recognitionStrength: 0,
     productionStrength: 0,
     sentenceStrength: 0,
@@ -84,50 +99,97 @@ export function createDefaultMemoryState(
     hintCount: 0,
     status: 'new',
     updatedAt: now,
-    phase: 'NEW',
     lastReviewAt: null,
     nextDueAt: now,
-    lastResponse: null,
-    sureStreak: 0,
-    lapseCount: 0,
     reviewCount: 0,
-    responseTimeMs: 0,
-    fastFlag: false,
-    supportLevel: 0,
-    halfLife: SCIENCE_CONFIG.defaultInitialHalfLifeDays,
-    predictedRecall: 0,
-    verifiedSureDates: [],
-    importance: 0.5,
-    relearnStep: 0,
-    stabilizingStep: 0,
   };
+}
+
+/* ===================== FSRS card <-> MemoryState ===================== */
+
+function ratingToGrade(rating: ConfidenceRating | string | undefined): Grade {
+  if (rating === 'know_well' || rating === 'exact') return Rating.Good;
+  if (rating === 'unsure' || rating === 'ambiguous' || rating === 'somewhat') return Rating.Hard;
+  return Rating.Again;
+}
+
+const lastReviewOf = (s: MemoryState): number | null => s.lastReviewAt ?? s.lastReviewedAt ?? null;
+const reviewCountOf = (s: MemoryState): number => s.reviewCount ?? (s.correctCount || 0) + (s.wrongCount || 0);
+
+/**
+ * Builds the FSRS card for a stored state. Words studied before the FSRS switch
+ * (and not converted by the storage migration) get an estimate from the old
+ * half-life model: the old model's 90%-recall time is 0.152 × half-life.
+ */
+function toCard(s: MemoryState): Card {
+  const reviews = reviewCountOf(s);
+  const last = lastReviewOf(s);
+  if (reviews === 0 || last === null) return createEmptyCard(new Date(s.nextDueAt ?? Date.now()));
+
+  const hasFsrs = typeof s.fsrsStability === 'number' && s.fsrsStability > 0;
+  const lapses = s.lapseCount ?? s.lapses ?? 0;
+  const stability = hasFsrs ? s.fsrsStability! : Math.max(0.1, (s.halfLife ?? 1) * -Math.log2(DESIRED_RETENTION));
+  const difficulty = hasFsrs ? s.fsrsDifficulty ?? 5 : Math.min(10, Math.max(1, 5 + lapses));
+  const due = s.nextDueAt ?? s.nextReviewAt ?? last;
+  return {
+    due: new Date(due),
+    stability,
+    difficulty,
+    elapsed_days: 0,
+    scheduled_days: Math.max(0, Math.round((due - last) / MS_PER_DAY)),
+    learning_steps: 0,
+    reps: reviews,
+    lapses,
+    state: (s.fsrsState as State | undefined) ?? State.Review,
+    last_review: new Date(last),
+  };
+}
+
+function withCard(s: MemoryState, card: Card): MemoryState {
+  const last = card.last_review ? card.last_review.getTime() : null;
+  return {
+    ...s,
+    fsrsStability: card.stability,
+    fsrsDifficulty: card.difficulty,
+    fsrsState: card.state,
+    lapseCount: card.lapses,
+    lapses: card.lapses,
+    reviewCount: card.reps,
+    lastReviewAt: last,
+    lastReviewedAt: last,
+    nextDueAt: card.due.getTime(),
+    nextReviewAt: card.due.getTime(),
+  };
+}
+
+/** Predicted recall after `elapsedDays` for a word with this FSRS stability. */
+export function predictRecall(elapsedDays: number, stability: number): number {
+  if (stability <= 0) return 0;
+  return scheduler.forgetting_curve(Math.max(0, elapsedDays), stability);
 }
 
 /** Reads a memory state (or its absence) into the values the UI shows. */
 export function getMemoryView(state: MemoryState | undefined, now: number = Date.now()): MemoryView {
   const s = state || createDefaultMemoryState('tmp');
-  const science = migrateOrHydrateScienceState(s, now);
-  const reviewCount = science.reviewCount || 0;
+  const card = toCard(s);
+  const last = card.last_review ? card.last_review.getTime() : null;
 
-  if (reviewCount === 0 || !science.lastReviewAt) {
-    return { status: 'new', retention: null, isDue: false, nextDueAt: null, reviewCount: 0, science };
+  if (card.state === State.New || last === null) {
+    return { status: 'new', retention: null, isDue: false, nextDueAt: null, reviewCount: 0, stability: 0, difficulty: 0, lastReviewAt: null };
   }
 
-  let status: MemoryStatus = 'learning';
-  if (science.phase === 'MATURE') {
-    status = science.halfLife >= MASTERED_HALF_LIFE_DAYS ? 'mastered' : 'retaining';
-  }
-
-  const elapsedDays = Math.max(0, (now - science.lastReviewAt) / MS_PER_DAY);
-  const retention = calculateHlrRecall(elapsedDays, science.halfLife);
-
+  const status: MemoryStatus =
+    card.stability >= MASTERED_STABILITY_DAYS ? 'mastered' : card.stability >= RETAINING_STABILITY_DAYS ? 'retaining' : 'learning';
+  const due = card.due.getTime();
   return {
     status,
-    retention,
-    isDue: science.nextDueAt <= now,
-    nextDueAt: science.nextDueAt,
-    reviewCount,
-    science,
+    retention: predictRecall((now - last) / MS_PER_DAY, card.stability),
+    isDue: due <= now,
+    nextDueAt: due,
+    reviewCount: card.reps,
+    stability: card.stability,
+    difficulty: card.difficulty,
+    lastReviewAt: last,
   };
 }
 
@@ -141,16 +203,25 @@ export function refreshMemoryState(state: MemoryState, now: number = Date.now())
   };
 }
 
+/**
+ * Rebuilds a word's FSRS state by replaying its review history. Returns null when
+ * the history is incomplete (the event log is capped), so the caller can fall
+ * back to the half-life estimate in toCard.
+ */
+export function replayReviewHistory(state: MemoryState, events: ReviewEvent[]): MemoryState | null {
+  const reviews = reviewCountOf(state);
+  if (reviews === 0 || events.length === 0 || events.length < reviews) return null;
+  let card = createEmptyCard(new Date(events[0].reviewedAt));
+  for (const e of [...events].sort((a, b) => a.reviewedAt - b.reviewedAt)) {
+    card = scheduler.next(card, new Date(e.reviewedAt), ratingToGrade(e.confidenceRating ?? e.userAnswer)).card;
+  }
+  return refreshMemoryState(withCard(state, card));
+}
+
 export interface ReviewEvaluationResult {
   updatedState: MemoryState;
   intervalMinutes: number;
   feedback: string;
-}
-
-function ratingToResponse(rating: ConfidenceRating): UserResponseCode {
-  if (rating === 'know_well' || rating === 'exact') return 'SURE';
-  if (rating === 'unsure' || rating === 'ambiguous' || rating === 'somewhat') return 'UNSURE';
-  return 'UNKNOWN';
 }
 
 /** Applies one self-graded answer to a word's schedule. */
@@ -159,50 +230,14 @@ export function processReviewResult(
   params: { rating: ConfidenceRating; responseTimeMs: number; reviewedAt?: number; hintUsed?: boolean }
 ): ReviewEvaluationResult {
   const now = params.reviewedAt || Date.now();
-  const current = migrateOrHydrateScienceState(currentState, now);
-  const response = ratingToResponse(params.rating);
+  const grade = ratingToGrade(params.rating);
+  const { card } = scheduler.next(toCard(currentState), new Date(now), grade);
 
-  const res = processScienceReview(current, {
-    response,
-    responseTimeMs: params.responseTimeMs,
-    now,
-    // Self-graded flashcards: a quick "확실히 알아요" is a real answer, not a guess.
-    effectiveFastThresholdMs: 0,
-  });
-  const next = { ...res.nextState, fastFlag: false };
-
-  // While a word is still stabilising, the scheduler moves it on fixed steps
-  // (1·4·12 days) without touching its half-life. Align the half-life with the
-  // chosen interval so the retention % shown on screen matches the schedule
-  // (≈85% at the moment the word becomes due).
-  const target = SCIENCE_CONFIG.targetRecallDefault;
-  let intervalMinutes = res.intervalMinutes;
-  if ((next.phase === 'STABILIZING' || next.phase === 'RELEARN') && response !== 'UNKNOWN') {
-    const aligned = intervalMinutes / 1440 / -Math.log2(target);
-    next.halfLife = Math.min(SCIENCE_CONFIG.maxHalfLifeDays, Math.max(next.halfLife, aligned));
-  }
-  // A correct recall after E days is evidence the half-life is at least ~4×E.
-  // Without this floor, a word that was failed once and then relearned would
-  // return to MATURE with a tiny half-life and be asked every few hours.
-  if (next.phase === 'MATURE' && response === 'SURE' && current.lastReviewAt) {
-    const elapsedDays = (now - current.lastReviewAt) / MS_PER_DAY;
-    const floor = elapsedDays / -Math.log2(target);
-    if (floor > next.halfLife) {
-      next.halfLife = Math.min(SCIENCE_CONFIG.maxHalfLifeDays, floor);
-      intervalMinutes = Math.round(calculateHlrInterval(next.halfLife, target) * 1440);
-      next.nextDueAt = now + intervalMinutes * 60000;
-    }
-  }
-
-  const isCorrect = response !== 'UNKNOWN';
+  const isCorrect = grade !== Rating.Again;
   const updated: MemoryState = {
-    ...currentState,
-    ...next,
-    lastReviewedAt: now,
-    nextReviewAt: next.nextDueAt,
-    firstReviewedAt: currentState.firstReviewedAt ?? (current.reviewCount === 0 ? now : undefined),
-    consecutiveCorrect: next.sureStreak,
-    lapses: next.lapseCount,
+    ...withCard(currentState, card),
+    firstReviewedAt: currentState.firstReviewedAt ?? (reviewCountOf(currentState) === 0 ? now : undefined),
+    consecutiveCorrect: isCorrect ? (currentState.consecutiveCorrect || 0) + 1 : 0,
     correctCount: (currentState.correctCount || 0) + (isCorrect ? 1 : 0),
     wrongCount: (currentState.wrongCount || 0) + (isCorrect ? 0 : 1),
     averageResponseTime: currentState.averageResponseTime
@@ -214,8 +249,8 @@ export function processReviewResult(
 
   return {
     updatedState: refreshMemoryState(updated, now),
-    intervalMinutes,
-    feedback: res.feedbackMessage,
+    intervalMinutes: (card.due.getTime() - now) / 60000,
+    feedback: '',
   };
 }
 
@@ -349,10 +384,10 @@ export function generateSessionPlan(
     return { ...base, items: weak };
   }
 
+  // Most-forgotten first: if the session is cut short, the words closest to being lost were seen.
   const due = views
     .filter(v => v.view.status !== 'new' && v.view.isDue)
-    .map(v => ({ item: v.item, priority: calculateSciencePriority(v.view.science, now) }))
-    .sort((a, b) => b.priority - a.priority)
+    .sort((a, b) => (a.view.retention ?? 0) - (b.view.retention ?? 0))
     .map(v => v.item);
 
   const summary = getTodaySummary(allItems, memoryStateMap, settings, {}, now);
@@ -379,7 +414,7 @@ export function generateSessionPlan(
 }
 
 export const EMPTY_REASON_MESSAGE: Record<EmptyReason, string> = {
-  no_words: '아직 단어가 없습니다. 단어를 추가하거나 기본 단어장을 불러와 주세요.',
+  no_words: '아직 단어가 없습니다. 먼저 단어를 추가해 주세요.',
   empty_scope: '선택한 단어장·폴더에 단어가 없습니다.',
   no_sentences: '예문이 있는 단어가 없어 문맥 빈칸 문제를 낼 수 없습니다.',
   all_done: '오늘 복습할 단어를 모두 끝냈습니다.',

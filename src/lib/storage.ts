@@ -25,15 +25,17 @@ import {
   createDefaultMemoryState,
   getMemoryView,
   refreshMemoryState,
+  replayReviewHistory,
   startOfToday,
 } from './memoryEngine';
-import { LEGACY_SEED_ITEM_IDS, StarterDeck } from '../data/starterDecks';
+import { LEGACY_SEED_ITEM_IDS } from '../data/legacySeedIds';
 import { getLanguageMeta } from './languageHelper';
 
 const STORAGE_KEYS = {
   PROFILES: 'vocacurve_profiles_v1',
   ACTIVE_USER: 'vocacurve_active_user_id_v1',
   ONBOARDING_DONE: 'vocacurve_onboarding_completed_v1',
+  TRIAL_OFFER: 'vocacurve_trial_offer_v1',
   COLLECTIONS: 'vocacurve_collections_v1',
   FOLDERS: 'vocacurve_folders_v1',
   ITEMS: 'vocacurve_items_v1',
@@ -41,6 +43,7 @@ const STORAGE_KEYS = {
   REVIEW_EVENTS: 'vocacurve_review_events_v1',
   SETTINGS: 'vocacurve_settings_v1',
   MIGRATION_V2: 'vocacurve_migration_v2',
+  MIGRATION_FSRS: 'vocacurve_migration_fsrs',
 };
 
 export const STORAGE_ERROR_EVENT = 'vocacurve:storage-error';
@@ -225,6 +228,7 @@ export function deleteProfile(id: string): void {
       STORAGE_KEYS.REVIEW_EVENTS,
       STORAGE_KEYS.SETTINGS,
       STORAGE_KEYS.MIGRATION_V2,
+      STORAGE_KEYS.MIGRATION_FSRS,
     ].forEach(k => localStorage.removeItem(getUserScopedKey(k, id)));
   }
 
@@ -249,12 +253,24 @@ export function completeOnboarding(name: string, targetLanguage: LanguageCode = 
   const items = getVocabularyItems();
   const collections = getCollections();
   if (items.length === 0) {
+    // Only a fresh install (no words yet) is offered the sample-word trial.
+    localStorage.setItem(STORAGE_KEYS.TRIAL_OFFER, 'true');
     const onlyEmptyDefaults = collections.every(c => c.id.startsWith('col_my_'));
     if (collections.length === 0 || onlyEmptyDefaults) {
       setJson(getUserScopedKey(STORAGE_KEYS.COLLECTIONS), [createDefaultCollection(targetLanguage)]);
     }
   }
   return updated;
+}
+
+/** True until a brand-new learner saves their first words (or dismisses the trial). */
+export function isTrialOfferActive(): boolean {
+  if (typeof window === 'undefined') return false;
+  return localStorage.getItem(STORAGE_KEYS.TRIAL_OFFER) === 'true';
+}
+
+export function endTrialOffer(): void {
+  if (typeof window !== 'undefined') localStorage.removeItem(STORAGE_KEYS.TRIAL_OFFER);
 }
 
 /* ================= Init & migration ================= */
@@ -270,6 +286,30 @@ export function initializeStorageIfNeeded(): void {
   }
 
   runMigrationV2();
+  runMigrationFsrs();
+}
+
+/**
+ * Moves words studied with the old half-life scheduler onto FSRS by replaying
+ * each word's review history. Words whose history was trimmed (the event log is
+ * capped) keep an estimate derived from their old half-life (see toCard).
+ */
+function runMigrationFsrs(): void {
+  const flagKey = getUserScopedKey(STORAGE_KEYS.MIGRATION_FSRS);
+  if (getJson<boolean>(flagKey, false)) return;
+
+  const eventsById = new Map<string, ReviewEvent[]>();
+  for (const e of getReviewEvents()) {
+    const list = eventsById.get(e.vocabularyItemId);
+    if (list) list.push(e);
+    else eventsById.set(e.vocabularyItemId, [e]);
+  }
+  const statesKey = getUserScopedKey(STORAGE_KEYS.MEMORY_STATES);
+  const states = getJson<MemoryState[]>(statesKey, []);
+  const migrated = states.map(s =>
+    typeof s.fsrsStability === 'number' ? s : replayReviewHistory(s, eventsById.get(s.vocabularyItemId) || []) || s
+  );
+  if (setJson(statesKey, migrated)) setJson(flagKey, true);
 }
 
 /**
@@ -516,27 +556,6 @@ export function cleanAndRepairVocabulary(): { repairedCount: number; removedCoun
   return { repairedCount, removedCount };
 }
 
-/** Imports a starter deck as brand-new words (no history). Returns words added. */
-export function importStarterDeck(deck: StarterDeck): number {
-  const usedCollectionIds = new Set(deck.items.map(i => i.collectionId));
-  const existingCols = getCollections();
-  const existingColIds = new Set(existingCols.map(c => c.id));
-  for (const col of deck.collections) {
-    if (usedCollectionIds.has(col.id) && !existingColIds.has(col.id)) {
-      saveCollection({ ...col, createdAt: Date.now(), updatedAt: Date.now() });
-    }
-  }
-  const usedFolderIds = new Set(deck.items.map(i => i.folderId).filter(Boolean) as string[]);
-  const existingFolderIds = new Set(getFolders().map(f => f.id));
-  for (const folder of deck.folders) {
-    if (usedFolderIds.has(folder.id) && !existingFolderIds.has(folder.id)) {
-      saveFolder({ ...folder, createdAt: Date.now(), updatedAt: Date.now() });
-    }
-  }
-  const now = Date.now();
-  return saveVocabularyItems(deck.items.map((i, idx) => ({ ...i, createdAt: now + idx, updatedAt: now })));
-}
-
 /* ================= Memory states & review events ================= */
 
 function getRawMemoryStates(): MemoryState[] {
@@ -558,6 +577,22 @@ export function saveMemoryState(state: MemoryState): void {
   if (index >= 0) states[index] = state;
   else states.push(state);
   setJson(getUserScopedKey(STORAGE_KEYS.MEMORY_STATES), states);
+}
+
+/** Undo: puts a word's schedule back to what it was (no state = never studied). */
+export function restoreMemoryState(vocabularyItemId: string, previous: MemoryState | undefined): void {
+  if (previous) return saveMemoryState(previous);
+  setJson(
+    getUserScopedKey(STORAGE_KEYS.MEMORY_STATES),
+    getRawMemoryStates().filter(s => s.vocabularyItemId !== vocabularyItemId)
+  );
+}
+
+export function removeReviewEvent(eventId: string): void {
+  setJson(
+    getUserScopedKey(STORAGE_KEYS.REVIEW_EVENTS),
+    getReviewEvents().filter(e => e.id !== eventId)
+  );
 }
 
 export function getReviewEvents(): ReviewEvent[] {
@@ -750,6 +785,7 @@ export function importUserDataFromJson(jsonStr: string): boolean {
       localStorage.removeItem(getUserScopedKey(STORAGE_KEYS.MIGRATION_V2));
       runMigrationV2();
     }
+    localStorage.removeItem(getUserScopedKey(STORAGE_KEYS.MIGRATION_FSRS));
     initializeStorageIfNeeded();
     return ok;
   } catch (e) {

@@ -78,34 +78,3 @@ export async function prepareImageForUpload(file: File): Promise<{ blob: Blob; m
   }
   throw new ImagePrepError(isHeic(file) ? 'HEIC_UNSUPPORTED' : 'TOO_LARGE');
 }
-
-/** True on phones/tablets, where the native camera app (input capture) is the best camera. */
-export function prefersNativeCamera(): boolean {
-  try {
-    return window.matchMedia('(pointer: coarse)').matches;
-  } catch {
-    return false;
-  }
-}
-
-export type CameraErrorCode = 'PERMISSION' | 'NO_CAMERA' | 'IN_USE' | 'INSECURE' | 'BLOCKED_IN_FRAME' | 'UNKNOWN';
-
-export function describeCameraError(err: unknown): { code: CameraErrorCode; message: string } {
-  const name = (err as { name?: string })?.name || '';
-  if (!window.isSecureContext) {
-    return { code: 'INSECURE', message: '카메라는 https 주소에서만 쓸 수 있어요. 대신 "앨범에서"로 사진을 골라 주세요.' };
-  }
-  if (name === 'NotAllowedError' || name === 'SecurityError') {
-    const inFrame = window.self !== window.top;
-    return inFrame
-      ? { code: 'BLOCKED_IN_FRAME', message: '미리보기 화면에서는 카메라가 막혀 있어요. 앱 주소를 새 탭에서 열거나 "앨범에서"를 이용해 주세요.' }
-      : { code: 'PERMISSION', message: '카메라 권한이 꺼져 있어요. 브라우저 주소창 왼쪽의 자물쇠 → 카메라 → 허용으로 바꿔 주세요.' };
-  }
-  if (name === 'NotFoundError' || name === 'OverconstrainedError') {
-    return { code: 'NO_CAMERA', message: '사용할 수 있는 카메라를 찾지 못했어요. "앨범에서"로 사진을 골라 주세요.' };
-  }
-  if (name === 'NotReadableError' || name === 'AbortError') {
-    return { code: 'IN_USE', message: '다른 앱이 카메라를 쓰고 있어요. 그 앱을 닫고 다시 시도해 주세요.' };
-  }
-  return { code: 'UNKNOWN', message: '카메라를 열지 못했어요. "앨범에서"로 사진을 골라 주세요.' };
-}

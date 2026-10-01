@@ -170,25 +170,6 @@ export async function extractVocabularyFromText(text: string, sourceLanguage: st
   return { ok: true, data: words };
 }
 
-export interface StarterWord extends ExtractedWord {
-  exampleEn?: string;
-  exampleKo?: string;
-}
-
-/** Asks Gemini for a beginner word list in one language (for languages without a built-in deck). */
-export async function generateStarterDeck(
-  sourceLanguage: string,
-  level: 'beginner' | 'elementary' | 'intermediate',
-  topic: string,
-  count = 30
-): Promise<AIResult<StarterWord[]>> {
-  const res = await postJson<{ words: StarterWord[] }>('/api/ai/starter-deck', { sourceLanguage, level, topic, count }, 90000);
-  if (!res.ok) return res;
-  const words = (res.data.words || []).filter(w => w && w.term && w.meaning);
-  if (words.length === 0) return { ok: false, error: describeError(500) };
-  return { ok: true, data: words };
-}
-
 /** Runs async tasks with limited concurrency (keeps us under the rate limit). */
 export async function mapWithConcurrency<T, R>(
   list: T[],
