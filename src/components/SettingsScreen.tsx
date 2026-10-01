@@ -91,7 +91,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
       <Card className="px-4 mb-8 divide-y divide-line">
         <Toggle
           label="단어 발음 자동 재생"
-          description="카드가 나올 때 기기 음성으로 읽어 줍니다"
+          description="카드를 뒤집어 답을 볼 때 기기 음성으로 읽어 줍니다"
           checked={settings.audioPronunciation}
           onChange={v => onUpdateSettings({ audioPronunciation: v })}
         />
