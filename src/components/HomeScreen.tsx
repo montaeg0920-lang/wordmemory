@@ -12,10 +12,6 @@ import {
 import { SessionOptions, formatDueAt, getTodaySummary } from '../lib/memoryEngine';
 import { StatsSummary } from '../lib/storage';
 import { getLanguageMeta } from '../lib/languageHelper';
-import { StarterDeck } from '../data/starterDecks';
-import { StarterWord } from '../lib/aiClient';
-import { StarterDeckPicker } from './StarterDeckPicker';
-import { LanguageCode } from '../types/database';
 import { TabType } from './Navbar';
 import { Button, Card, SectionLabel, Segmented, Select } from './ui';
 
@@ -31,8 +27,6 @@ interface HomeScreenProps {
   onStart: (options: SessionOptions) => void;
   onNavigateTab: (tab: TabType) => void;
   onOpenCollection: (collectionId: string) => void;
-  onImportDeck: (deck: StarterDeck) => void;
-  onImportGenerated: (title: string, words: StarterWord[]) => void;
 }
 
 const SECONDS_PER_CARD = 8;
@@ -49,8 +43,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onStart,
   onNavigateTab,
   onOpenCollection,
-  onImportDeck,
-  onImportGenerated,
 }) => {
   const lang = getLanguageMeta(activeProfile.targetLanguage);
   const [showOptions, setShowOptions] = useState(false);
@@ -92,12 +84,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
       {/* ---------- Today card ---------- */}
       {items.length === 0 ? (
-        <EmptyStart
-          language={activeProfile.targetLanguage}
-          onImportGenerated={onImportGenerated}
-          onAdd={() => onNavigateTab('import')}
-          onImportDeck={onImportDeck}
-        />
+        <EmptyStart onAdd={() => onNavigateTab('import')} />
       ) : (
         <Card className="p-5">
           {todayCount > 0 ? (
@@ -264,12 +251,7 @@ const MiniStat: React.FC<{ label: string; value: React.ReactNode }> = ({ label, 
   </div>
 );
 
-const EmptyStart: React.FC<{
-  language: LanguageCode;
-  onAdd: () => void;
-  onImportDeck: (deck: StarterDeck) => void;
-  onImportGenerated: (title: string, words: StarterWord[]) => void;
-}> = ({ language, onAdd, onImportDeck, onImportGenerated }) => (
+const EmptyStart: React.FC<{ onAdd: () => void }> = ({ onAdd }) => (
   <Card className="p-5">
     <p className="text-sm font-medium text-muted">시작하기</p>
     <p className="text-[22px] font-bold mt-1 leading-snug">외울 단어를 먼저 넣어 주세요</p>
@@ -279,9 +261,5 @@ const EmptyStart: React.FC<{
     <Button variant="primary" size="lg" block className="mt-5" onClick={onAdd}>
       <Plus className="w-5 h-5" /> 내 단어 추가하기
     </Button>
-    <div className="mt-5">
-      <p className="text-[13px] text-muted mb-2">또는 기본 단어장으로 시작</p>
-      <StarterDeckPicker language={language} onImportDeck={onImportDeck} onImportGenerated={onImportGenerated} />
-    </div>
   </Card>
 );

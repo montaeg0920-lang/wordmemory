@@ -27,7 +27,7 @@ import {
   refreshMemoryState,
   startOfToday,
 } from './memoryEngine';
-import { LEGACY_SEED_ITEM_IDS, StarterDeck } from '../data/starterDecks';
+import { LEGACY_SEED_ITEM_IDS } from '../data/legacySeedIds';
 import { getLanguageMeta } from './languageHelper';
 
 const STORAGE_KEYS = {
@@ -514,27 +514,6 @@ export function cleanAndRepairVocabulary(): { repairedCount: number; removedCoun
     );
   }
   return { repairedCount, removedCount };
-}
-
-/** Imports a starter deck as brand-new words (no history). Returns words added. */
-export function importStarterDeck(deck: StarterDeck): number {
-  const usedCollectionIds = new Set(deck.items.map(i => i.collectionId));
-  const existingCols = getCollections();
-  const existingColIds = new Set(existingCols.map(c => c.id));
-  for (const col of deck.collections) {
-    if (usedCollectionIds.has(col.id) && !existingColIds.has(col.id)) {
-      saveCollection({ ...col, createdAt: Date.now(), updatedAt: Date.now() });
-    }
-  }
-  const usedFolderIds = new Set(deck.items.map(i => i.folderId).filter(Boolean) as string[]);
-  const existingFolderIds = new Set(getFolders().map(f => f.id));
-  for (const folder of deck.folders) {
-    if (usedFolderIds.has(folder.id) && !existingFolderIds.has(folder.id)) {
-      saveFolder({ ...folder, createdAt: Date.now(), updatedAt: Date.now() });
-    }
-  }
-  const now = Date.now();
-  return saveVocabularyItems(deck.items.map((i, idx) => ({ ...i, createdAt: now + idx, updatedAt: now })));
 }
 
 /* ================= Memory states & review events ================= */

@@ -4,18 +4,13 @@ import { UserProfile, UserSettings } from '../types/database';
 import { clearAllWords, exportUserDataAsJson, importUserDataFromJson } from '../lib/storage';
 import { getLanguageMeta } from '../lib/languageHelper';
 import { usePWAInstall } from '../hooks/usePWAInstall';
-import { StarterDeck } from '../data/starterDecks';
-import { StarterWord } from '../lib/aiClient';
-import { StarterDeckPicker } from './StarterDeckPicker';
-import { Button, Card, Notice, ScreenHeader, SectionLabel, Segmented, Sheet, Toggle } from './ui';
+import { Button, Card, Notice, ScreenHeader, SectionLabel, Segmented, Toggle } from './ui';
 
 interface SettingsScreenProps {
   settings: UserSettings;
   activeProfile: UserProfile;
   onOpenProfileModal: () => void;
   onUpdateSettings: (partial: Partial<UserSettings>) => void;
-  onImportDeck: (deck: StarterDeck) => void;
-  onImportGenerated: (title: string, words: StarterWord[]) => void;
   onDataChanged: () => void;
 }
 
@@ -26,14 +21,11 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   activeProfile,
   onOpenProfileModal,
   onUpdateSettings,
-  onImportDeck,
-  onImportGenerated,
   onDataChanged,
 }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const fileRef = useRef<HTMLInputElement>(null);
   const [message, setMessage] = useState<{ tone: 'good' | 'bad'; text: string } | null>(null);
-  const [showDecks, setShowDecks] = useState(false);
   const lang = getLanguageMeta(activeProfile.targetLanguage);
   const dailyNew = settings.dailyNewWords ?? 10;
 
@@ -123,7 +115,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
       <Card className="mb-2 divide-y divide-line">
         <RowButton onClick={downloadBackup} icon={<Download className="w-5 h-5" />} label="백업 파일 받기" />
         <RowButton onClick={() => fileRef.current?.click()} icon={<Upload className="w-5 h-5" />} label="백업 파일로 복원" />
-        <RowButton onClick={() => setShowDecks(true)} label={`${lang.name} 기본 단어장 불러오기`} />
       </Card>
       <p className="text-[12px] text-muted px-1 mb-8 leading-relaxed">
         단어와 기록은 이 기기의 브라우저에만 저장됩니다. 브라우저 데이터를 지우거나 기기를 바꾸면 사라지므로, 가끔 백업 파일을 받아 두세요.
@@ -170,22 +161,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </button>
       </Card>
 
-      {showDecks && (
-        <Sheet title={`${lang.name} 기본 단어장`} onClose={() => setShowDecks(false)}>
-          <p className="text-[14px] text-ink-2 mb-3">{lang.name} 단어장만 보입니다. 새 단어로 추가되며, 이미 있는 단어는 건너뜁니다.</p>
-          <StarterDeckPicker
-            language={activeProfile.targetLanguage}
-            onImportDeck={deck => {
-              onImportDeck(deck);
-              setShowDecks(false);
-            }}
-            onImportGenerated={(title, words) => {
-              onImportGenerated(title, words);
-              setShowDecks(false);
-            }}
-          />
-        </Sheet>
-      )}
     </div>
   );
 };

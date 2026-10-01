@@ -226,58 +226,6 @@ Rules:
   }
 });
 
-/**
- * Starter deck for a language that has no built-in deck (e.g. 프랑스어, 스페인어).
- * Body: { sourceLanguage, level: 'beginner'|'elementary'|'intermediate', topic?: string, count?: number }
- */
-app.post('/api/ai/starter-deck', async (req, res) => {
-  try {
-    const { sourceLanguage = 'en', level = 'beginner', topic = '', count = 30 } = req.body || {};
-    if (!LANGUAGE_NAMES[sourceLanguage] || sourceLanguage === 'ko' || sourceLanguage === 'other') {
-      return res.status(400).json({ error: 'INVALID_LANGUAGE' });
-    }
-    if (typeof topic !== 'string' || topic.length > 60) return res.status(400).json({ error: 'INVALID_TOPIC' });
-    if (!ai) return res.status(503).json({ error: 'AI_NOT_CONFIGURED' });
-
-    const n = Math.max(10, Math.min(50, Number(count) || 30));
-    const levelText = { beginner: 'absolute beginner (A1)', elementary: 'elementary (A2)', intermediate: 'intermediate (B1)' }[level as string] || 'beginner (A1)';
-    const prompt = `Create a list of the ${n} most useful ${langNameOf(sourceLanguage)} words for a Korean ${levelText} learner${topic ? ` about "${topic}"` : ''}.
-For each word give: term (in ${langNameOf(sourceLanguage)}, with articles/accents where natural), meaning (short Korean), partOfSpeech (Korean), pronunciation (Korean-friendly reading or IPA), exampleEn (one short, natural ${langNameOf(sourceLanguage)} example sentence using the word), exampleKo (Korean translation).
-Use only ${langNameOf(sourceLanguage)} words. No duplicates. Order from most to least useful.`;
-
-    const schema = {
-      type: Type.OBJECT,
-      properties: {
-        words: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              term: { type: Type.STRING },
-              meaning: { type: Type.STRING },
-              partOfSpeech: { type: Type.STRING },
-              pronunciation: { type: Type.STRING },
-              exampleEn: { type: Type.STRING },
-              exampleKo: { type: Type.STRING },
-            },
-            required: ['term', 'meaning'],
-          },
-        },
-      },
-      required: ['words'],
-    };
-    const parsed = await generateJson(prompt, schema);
-    return res.json({ success: true, words: Array.isArray(parsed.words) ? parsed.words.slice(0, n) : [] });
-  } catch (err: any) {
-    console.error('Gemini starter deck error:', err);
-    return res.status(500).json({ error: 'AI_FAILED' });
-  }
-});
-
-function langNameOf(code: string) {
-  return LANGUAGE_NAMES[code] || 'the language';
-}
-
 // Setup Vite middleware in dev or static files in production
 async function startServer() {
   if (process.env.NODE_ENV === 'production') {
