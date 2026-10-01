@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Flame, Play, Plus } from 'lucide-react';
+import { ChevronDown, ChevronRight, Flame, Moon, Play, Plus } from 'lucide-react';
 import {
   MemoryState,
   StudyDirection,
@@ -105,6 +105,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 <Play className="w-5 h-5" fill="currentColor" strokeWidth={0} />
                 시작하기
               </Button>
+              {new Date().getHours() >= 19 && (
+                <p className="flex items-start gap-2 text-[13px] text-muted mt-4 leading-relaxed">
+                  <Moon className="w-4 h-4 shrink-0 mt-0.5" />
+                  자기 전에 복습하면 자는 동안 기억이 정리돼서, 내일 다시 볼 때 더 쉽고 오래 남아요.
+                </p>
+              )}
             </>
           ) : (
             <>

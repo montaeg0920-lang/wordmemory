@@ -18,7 +18,7 @@ const STEPS: { icon: React.ComponentType<{ className?: string }>; title: string;
   {
     icon: CalendarCheck,
     title: '2. 매일 "오늘 할 일"만 하면 돼요',
-    body: '홈 화면의 시작 버튼을 누르면 오늘 복습할 단어와 새 단어가 섞여 나와요. 하루 몇 분이면 충분해요. 새 단어 개수는 설정에서 바꿀 수 있어요.',
+    body: '홈 화면의 시작 버튼을 누르면 오늘 복습할 단어와 새 단어가 함께 나와요. 하루 몇 분이면 충분해요. 자기 전에 하면 자는 동안 기억이 정리돼서 더 오래 남아요. 새 단어 개수는 설정에서 바꿀 수 있어요.',
   },
   {
     icon: BookOpenCheck,

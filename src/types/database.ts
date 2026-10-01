@@ -122,7 +122,7 @@ export interface MemoryState {
   status: MemoryStatus;
   updatedAt: number;
 
-  // Learning Science Engine (scienceSchedulerV1) backward-compatible extensions
+  // Legacy half-life engine fields (kept so old data loads; no longer used for scheduling)
   phase?: 'NEW' | 'STABILIZING' | 'MATURE' | 'RELEARN';
   lastReviewAt?: number | null;
   nextDueAt?: number;
@@ -140,6 +140,11 @@ export interface MemoryState {
   relearnStep?: number;
   stabilizingStep?: number;
   firstReviewedAt?: number; // 처음 학습한 시각 (하루 새 단어 수 계산용)
+
+  // FSRS (ts-fsrs) memory state — the fields the scheduler actually uses
+  fsrsStability?: number;  // days until predicted recall drops to 90%
+  fsrsDifficulty?: number; // 1 (easy) .. 10 (hard)
+  fsrsState?: number;      // ts-fsrs State: 0 New, 1 Learning, 2 Review, 3 Relearning
 }
 
 export interface ReviewEvent {

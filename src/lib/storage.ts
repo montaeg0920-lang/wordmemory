@@ -25,6 +25,7 @@ import {
   createDefaultMemoryState,
   getMemoryView,
   refreshMemoryState,
+  replayReviewHistory,
   startOfToday,
 } from './memoryEngine';
 import { LEGACY_SEED_ITEM_IDS } from '../data/legacySeedIds';
@@ -42,6 +43,7 @@ const STORAGE_KEYS = {
   REVIEW_EVENTS: 'vocacurve_review_events_v1',
   SETTINGS: 'vocacurve_settings_v1',
   MIGRATION_V2: 'vocacurve_migration_v2',
+  MIGRATION_FSRS: 'vocacurve_migration_fsrs',
 };
 
 export const STORAGE_ERROR_EVENT = 'vocacurve:storage-error';
@@ -226,6 +228,7 @@ export function deleteProfile(id: string): void {
       STORAGE_KEYS.REVIEW_EVENTS,
       STORAGE_KEYS.SETTINGS,
       STORAGE_KEYS.MIGRATION_V2,
+      STORAGE_KEYS.MIGRATION_FSRS,
     ].forEach(k => localStorage.removeItem(getUserScopedKey(k, id)));
   }
 
@@ -283,6 +286,30 @@ export function initializeStorageIfNeeded(): void {
   }
 
   runMigrationV2();
+  runMigrationFsrs();
+}
+
+/**
+ * Moves words studied with the old half-life scheduler onto FSRS by replaying
+ * each word's review history. Words whose history was trimmed (the event log is
+ * capped) keep an estimate derived from their old half-life (see toCard).
+ */
+function runMigrationFsrs(): void {
+  const flagKey = getUserScopedKey(STORAGE_KEYS.MIGRATION_FSRS);
+  if (getJson<boolean>(flagKey, false)) return;
+
+  const eventsById = new Map<string, ReviewEvent[]>();
+  for (const e of getReviewEvents()) {
+    const list = eventsById.get(e.vocabularyItemId);
+    if (list) list.push(e);
+    else eventsById.set(e.vocabularyItemId, [e]);
+  }
+  const statesKey = getUserScopedKey(STORAGE_KEYS.MEMORY_STATES);
+  const states = getJson<MemoryState[]>(statesKey, []);
+  const migrated = states.map(s =>
+    typeof s.fsrsStability === 'number' ? s : replayReviewHistory(s, eventsById.get(s.vocabularyItemId) || []) || s
+  );
+  if (setJson(statesKey, migrated)) setJson(flagKey, true);
 }
 
 /**
@@ -742,6 +769,7 @@ export function importUserDataFromJson(jsonStr: string): boolean {
       localStorage.removeItem(getUserScopedKey(STORAGE_KEYS.MIGRATION_V2));
       runMigrationV2();
     }
+    localStorage.removeItem(getUserScopedKey(STORAGE_KEYS.MIGRATION_FSRS));
     initializeStorageIfNeeded();
     return ok;
   } catch (e) {
