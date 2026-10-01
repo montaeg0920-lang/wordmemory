@@ -12,7 +12,40 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use(express.json({ limit: '10mb' }));
+app.set('trust proxy', true);
+app.use('/api/ai/extract-vocab', express.json({ limit: '12mb' }));
+app.use(express.json({ limit: '100kb' }));
+
+/**
+ * Simple in-memory rate limit for the AI endpoints so that nobody can burn the
+ * Gemini quota by calling /api/ai/* in a loop. (Per server instance, per IP.)
+ */
+const RATE_WINDOW_MS = 10 * 60 * 1000;
+const RATE_MAX_REQUESTS = 300;
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+app.use('/api/ai', (req, res, next) => {
+  const key = req.ip || 'unknown';
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+  if (!bucket || bucket.resetAt < now) {
+    rateBuckets.set(key, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    if (rateBuckets.size > 5000) {
+      for (const [k, b] of rateBuckets) if (b.resetAt < now) rateBuckets.delete(k);
+    }
+    return next();
+  }
+  bucket.count += 1;
+  if (bucket.count > RATE_MAX_REQUESTS) {
+    res.setHeader('Retry-After', Math.ceil((bucket.resetAt - now) / 1000).toString());
+    return res.status(429).json({ error: 'RATE_LIMITED', message: '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.' });
+  }
+  next();
+});
+
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: 'English', ja: 'Japanese', es: 'Spanish', de: 'German', fr: 'French', zh: 'Chinese',
+  he: 'Biblical Hebrew', el: 'Koine (Biblical) Greek', ko: 'Korean', other: 'the source language',
+};
 
 // Initialize GoogleGenAI client strictly according to skill guidelines
 const apiKey = process.env.GEMINI_API_KEY;
@@ -37,28 +70,19 @@ app.post('/api/ai/analyze-word', async (req, res) => {
   try {
     const { term, userMeaning, sourceLanguage = 'en', targetLanguage = 'ko' } = req.body;
 
-    if (!term) {
-      return res.status(400).json({ error: 'Term is required' });
+    if (!term || typeof term !== 'string' || term.length > 120) {
+      return res.status(400).json({ error: 'INVALID_TERM' });
+    }
+    if (typeof userMeaning === 'string' && userMeaning.length > 300) {
+      return res.status(400).json({ error: 'INVALID_MEANING' });
     }
 
     if (!ai) {
-      return res.json({
-        success: true,
-        aiData: {
-          lemma: term.toLowerCase().trim(),
-          partOfSpeech: '단어',
-          pronunciation: '',
-          alternativeMeanings: [],
-          difficulty: 3,
-          collocations: [],
-          exampleSentence: null,
-          distractors: ['유지하다', '설명하다', '비교하다'],
-        },
-        fallback: true,
-      });
+      return res.status(503).json({ error: 'AI_NOT_CONFIGURED' });
     }
 
-    const prompt = `Analyze the vocabulary word "${term}" (source language: ${sourceLanguage}, target language: ${targetLanguage}).
+    const langName = LANGUAGE_NAMES[sourceLanguage] || sourceLanguage;
+    const prompt = `Analyze the vocabulary word "${term}" (source language: ${langName}, target language: ${targetLanguage === 'ko' ? 'Korean' : targetLanguage}).
 User provided primary meaning: "${userMeaning || ''}".
 Generate educational data for spaced repetition learning:
 1. lemma (base form / lexicon root)
@@ -112,130 +136,72 @@ Generate educational data for spaced repetition learning:
     return res.json({ success: true, aiData: parsed });
   } catch (err: any) {
     console.error('Gemini analyze error:', err);
-    return res.status(500).json({ error: err.message || 'AI analysis failed' });
+    return res.status(500).json({ error: 'AI_FAILED' });
   }
 });
 
 /**
- * Generate Context Sentences for Level 4
+ * Extract a vocabulary list from a photo (OCR) or a PDF using Gemini.
+ * Body: { mimeType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/heic' | 'application/pdf', data: base64, sourceLanguage?: string }
  */
-app.post('/api/ai/generate-context', async (req, res) => {
+const EXTRACT_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf']);
+app.post('/api/ai/extract-vocab', async (req, res) => {
   try {
-    const { term, userMeaning } = req.body;
-    if (!term) return res.status(400).json({ error: 'Term is required' });
-
+    const { mimeType, data, sourceLanguage = 'en' } = req.body || {};
+    if (!EXTRACT_MIME.has(mimeType) || typeof data !== 'string' || data.length < 10) {
+      return res.status(400).json({ error: 'INVALID_FILE' });
+    }
     if (!ai) {
-      return res.json({
-        success: true,
-        sentence: `The research team was able to ______ the necessary data from multiple sources.`,
-        targetWord: term,
-        correctInflection: term,
-        translationKo: `연구팀은 여러 출처에서 필요한 데이터를 얻어낼 수 있었다.`,
-        hint: userMeaning || '',
-      });
+      return res.status(503).json({ error: 'AI_NOT_CONFIGURED' });
     }
 
-    const prompt = `Create a natural fill-in-the-blank (cloze) English sentence for the word "${term}" (Korean meaning: "${userMeaning || ''}").
-The blank should be represented as "______".
-Provide:
-- sentenceWithBlank: English sentence with "______"
-- targetWord: the base word
-- correctInflection: the exact inflected form that grammatically fits into the blank (e.g. "derives", "derived", "deriving", or "derive")
-- translationKo: Korean translation of the full completed sentence
-- hint: gentle Korean meaning hint`;
+    const langName = LANGUAGE_NAMES[sourceLanguage] || 'the foreign language';
+    const prompt = `This ${mimeType === 'application/pdf' ? 'document' : 'image'} is a vocabulary list or a textbook page for a Korean learner studying ${langName}.
+Extract every vocabulary entry you can see as a list of { term, meaning }.
+- term: the foreign word or phrase exactly as written (keep accents, Hebrew vowel points, Greek accents).
+- meaning: the Korean meaning as written. If no Korean meaning is printed, write a short natural Korean meaning yourself.
+- partOfSpeech: in Korean (명사, 동사, 형용사, 부사 ...) if printed or obvious, otherwise omit.
+- pronunciation: only if printed on the page.
+Ignore page numbers, headings, instructions and example sentences. Do not invent entries that are not on the page. Maximum 300 entries.`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
-      contents: prompt,
+      contents: [
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType, data } }, { text: prompt }],
+        },
+      ],
       config: {
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            sentenceWithBlank: { type: Type.STRING },
-            targetWord: { type: Type.STRING },
-            correctInflection: { type: Type.STRING },
-            translationKo: { type: Type.STRING },
-            hint: { type: Type.STRING },
+            words: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  term: { type: Type.STRING },
+                  meaning: { type: Type.STRING },
+                  partOfSpeech: { type: Type.STRING },
+                  pronunciation: { type: Type.STRING },
+                },
+                required: ['term', 'meaning'],
+              },
+            },
           },
-          required: ['sentenceWithBlank', 'correctInflection', 'translationKo'],
+          required: ['words'],
         },
       },
     });
 
-    const parsed = JSON.parse(response.text || '{}');
-    return res.json({ success: true, ...parsed });
+    const parsed = JSON.parse(response.text || '{"words":[]}');
+    const words = Array.isArray(parsed.words) ? parsed.words.slice(0, 300) : [];
+    return res.json({ success: true, words });
   } catch (err: any) {
-    console.error('Gemini context generation error:', err);
-    return res.status(500).json({ error: err.message || 'Failed to generate context' });
-  }
-});
-
-/**
- * Semantic Meaning Matching (Level 2: Meaning recall Korean semantic check)
- */
-app.post('/api/ai/semantic-match', async (req, res) => {
-  try {
-    const { userResponse, targetMeaning, alternativeMeanings = [] } = req.body;
-    if (!userResponse || !targetMeaning) {
-      return res.status(400).json({ error: 'Missing parameters' });
-    }
-
-    const cleanUser = userResponse.trim().toLowerCase();
-    const cleanTarget = targetMeaning.trim().toLowerCase();
-
-    // Fast heuristic match first
-    if (cleanUser === cleanTarget) {
-      return res.json({ isMatch: true, explanation: 'Exact match' });
-    }
-
-    // Substring or token overlap
-    const targetTokens = cleanTarget.split(/[\s,~./]+/).filter(Boolean);
-    const userTokens = cleanUser.split(/[\s,~./]+/).filter(Boolean);
-    const hasOverlap = targetTokens.some((t: string) => cleanUser.includes(t)) || userTokens.some((u: string) => cleanTarget.includes(u));
-
-    if (hasOverlap) {
-      return res.json({ isMatch: true, explanation: 'Token overlap' });
-    }
-
-    const altMatches = (alternativeMeanings as string[]).some((alt: string) => {
-      const cleanAlt = alt.trim().toLowerCase();
-      return cleanAlt === cleanUser || cleanAlt.includes(cleanUser) || cleanUser.includes(cleanAlt);
-    });
-
-    if (altMatches) {
-      return res.json({ isMatch: true, explanation: 'Alternative meaning match' });
-    }
-
-    if (!ai) {
-      return res.json({ isMatch: false, explanation: 'No semantic match found' });
-    }
-
-    // Call Gemini for nuanced Korean semantic equivalence
-    const prompt = `Evaluate if the Korean student's answer "${userResponse}" is semantically acceptable for the expected meaning "${targetMeaning}" (or alternatives: ${alternativeMeanings.join(', ')}).
-Respond in JSON with isMatch (boolean) and a brief Korean feedback.`;
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            isMatch: { type: Type.BOOLEAN },
-            feedback: { type: Type.STRING },
-          },
-          required: ['isMatch'],
-        },
-      },
-    });
-
-    const parsed = JSON.parse(response.text || '{"isMatch":false}');
-    return res.json(parsed);
-  } catch (err: any) {
-    console.error('Semantic match error:', err);
-    return res.json({ isMatch: false, fallback: true });
+    console.error('Gemini extract error:', err);
+    return res.status(500).json({ error: 'AI_FAILED' });
   }
 });
 

@@ -1,61 +1,171 @@
 @import "tailwindcss";
 
-/* Traditional Hebrew Biblical Textbook Typography (Frank Ruhl Hofshi)
- * Specifically targeted to Hebrew unicode block U+0590-05FF and presentation forms U+FB1D-FB4F.
- * This guarantees ONLY Hebrew characters change, while Korean, English, Japanese, and symbols remain 100% untouched.
+/*
+ * VocaCurve design tokens — "조용한 단어 카드 (Quiet Index Card)"
+ * Warm paper background, ink text, ONE accent colour. Status colours are muted
+ * and used only for the three self-rating answers and small status dots.
+ * Dark mode follows the phone setting unless the user picks one in 설정.
  */
+:root {
+  color-scheme: light;
+  --paper: #f7f5f0;
+  --surface: #ffffff;
+  --sunken: #efece5;
+  --ink: #1e1c19;
+  --ink-2: #4a463f;
+  --muted: #7d776d;
+  --line: #e6e1d7;
+  --line-strong: #d3ccbf;
+  --accent: #2b4c7e;
+  --accent-hover: #223e68;
+  --accent-soft: #e8edf5;
+  --on-accent: #ffffff;
+  --good: #3e7b57;
+  --good-soft: #e5f0e8;
+  --warn: #9a6210;
+  --warn-soft: #f6ecd8;
+  --bad: #b0443a;
+  --bad-soft: #f6e3df;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --paper: #151412;
+  --surface: #1e1d1a;
+  --sunken: #282622;
+  --ink: #ece8e0;
+  --ink-2: #c6c0b5;
+  --muted: #958e83;
+  --line: #34312c;
+  --line-strong: #47433c;
+  --accent: #93b1de;
+  --accent-hover: #abc3e8;
+  --accent-soft: #232e3d;
+  --on-accent: #0f1620;
+  --good: #82c198;
+  --good-soft: #1e2c23;
+  --warn: #e2b264;
+  --warn-soft: #32291a;
+  --bad: #e88e83;
+  --bad-soft: #36211e;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-good: var(--good);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+
+  --font-sans: 'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
+    'Noto Sans KR', system-ui, sans-serif;
+  --font-serif: 'HebrewBiblicalFont', 'Source Serif 4', 'Noto Serif', Georgia, 'Times New Roman', serif;
+}
+
+/* Hebrew only: traditional biblical-textbook serif, scoped to the Hebrew unicode block. */
 @font-face {
   font-family: 'HebrewBiblicalFont';
   font-style: normal;
   font-weight: 400 900;
   font-display: swap;
-  src: local('Frank Ruhl Hofshi'), local('FrankRuehl'), local('David Libre'), local('Noto Serif Hebrew'),
-       url('https://fonts.gstatic.com/s/frankruhlhofshi/v21/I_u0MoOVpRHSMVxtONwWtmDBzeSoBL7H.ttf') format('truetype');
+  src: local('Frank Ruhl Hofshi'), local('FrankRuehl'), local('Noto Serif Hebrew'),
+    url('https://fonts.gstatic.com/s/frankruhlhofshi/v21/I_u0MoOVpRHSMVxtONwWtmDBzeSoBL7H.ttf') format('truetype');
   unicode-range: U+0590-05FF, U+FB1D-FB4F;
 }
 
 @layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
   body {
-    font-family: 'HebrewBiblicalFont', -apple-system, BlinkMacSystemFont, "Plus Jakarta Sans", "Pretendard Variable", Pretendard, system-ui, sans-serif;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.55;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     -webkit-tap-highlight-color: transparent;
-    user-select: none;
     overscroll-behavior-y: none;
     word-break: keep-all;
     overflow-wrap: break-word;
   }
-
-  /* Universal word unity rule: individual words must not break across lines */
-  h1, h2, h3, h4, h5, h6, p, span, div, li, blockquote, label, button {
-    word-break: keep-all;
-    overflow-wrap: break-word;
+  button,
+  nav {
+    user-select: none;
+    -webkit-user-select: none;
   }
-
-  input, textarea {
-    user-select: text;
-    word-break: keep-all;
-    overflow-wrap: break-word;
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']),
+  label[for],
+  select {
+    cursor: pointer;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
   }
 }
 
-/* Explicit Hebrew Typography rules for clarity:
- * Ensures Vav (ו), Nun (נ, ן), Zayin (ז), Dalet (ד), Resh (ר), and vowel points (nikkud)
- * match the traditional Hebrew grammar textbook serif style with clear stroke contrast.
- */
 :lang(he),
-[dir="rtl"],
-.font-hebrew,
-[data-lang="he"] {
-  font-family: "Frank Ruhl Hofshi", "Noto Serif Hebrew", "David Libre", "SBL Hebrew", "Ezra SIL", "Taamey Frank CLM", serif !important;
-  font-feature-settings: "kern" 1, "mark" 1, "mkmk" 1;
+[dir='rtl'] {
+  font-family: 'HebrewBiblicalFont', 'Frank Ruhl Hofshi', 'Noto Serif Hebrew', 'SBL Hebrew', serif;
+  font-feature-settings: 'kern' 1, 'mark' 1, 'mkmk' 1;
 }
 
-/* Hide scrollbar for clean mobile tabs */
 .scrollbar-none::-webkit-scrollbar {
   display: none;
 }
 .scrollbar-none {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+/* Bottom padding that clears the tab bar and the iPhone home indicator. */
+.pb-tabbar {
+  padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+}
+.safe-bottom {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+.safe-top {
+  padding-top: max(0.75rem, env(safe-area-inset-top));
+}
+
+@keyframes vc-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.vc-enter {
+  animation: vc-fade-up 180ms ease-out backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .vc-enter {
+    animation: none;
+  }
 }

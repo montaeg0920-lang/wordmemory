@@ -327,7 +327,7 @@ export function processScienceReview(
 } {
   const now = input.now || Date.now();
   const next: ScienceMemoryFields = { ...current };
-  const effectiveThreshold = input.effectiveFastThresholdMs || SCIENCE_CONFIG.fastClickThresholdMs;
+  const effectiveThreshold = input.effectiveFastThresholdMs ?? SCIENCE_CONFIG.fastClickThresholdMs;
   const isFastClick = input.response === 'SURE' && input.responseTimeMs < effectiveThreshold;
 
   next.reviewCount += 1;

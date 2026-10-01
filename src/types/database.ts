@@ -139,6 +139,7 @@ export interface MemoryState {
   importance?: 0.0 | 0.5 | 1.0;
   relearnStep?: number;
   stabilizingStep?: number;
+  firstReviewedAt?: number; // 처음 학습한 시각 (하루 새 단어 수 계산용)
 }
 
 export interface ReviewEvent {
@@ -184,4 +185,6 @@ export interface UserSettings {
   gentleReminders: boolean;
   reminderTime: string;                  // e.g. "20:30"
   targetDailyReviews: number;
+  dailyNewWords?: number;                // 하루에 새로 배울 단어 수 (기본 10)
+  theme?: 'system' | 'light' | 'dark';   // 화면 밝기 테마
 }

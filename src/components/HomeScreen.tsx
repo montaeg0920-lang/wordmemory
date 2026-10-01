@@ -1,27 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import {
-  Play,
-  Sparkles,
-  Clock,
-  ArrowRight,
-  Brain,
-  Zap,
-  CheckCircle2,
-  ChevronRight,
-  BookOpen,
-  Target,
-  Plus,
-  Minus,
-  Trophy,
-  Flame,
-  Folder,
-  Layers,
-  BarChart3,
-  TrendingUp,
-  Lock,
-  User,
-  Smartphone,
-} from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { ChevronDown, ChevronRight, Flame, Play, Plus } from 'lucide-react';
 import {
   MemoryState,
   StudyDirection,
@@ -31,11 +9,12 @@ import {
   VocabularyFolder,
   VocabularyItem,
 } from '../types/database';
-import { generateSessionPlan, isLongTermMemoryItem, SessionPlan } from '../lib/memoryEngine';
+import { SessionOptions, formatDueAt, getTodaySummary } from '../lib/memoryEngine';
 import { StatsSummary } from '../lib/storage';
-import { getDirectionLabels } from '../lib/languageHelper';
-import { usePWAInstall } from '../hooks/usePWAInstall';
-import { MobileAppInstallModal } from './MobileAppInstallModal';
+import { getLanguageMeta } from '../lib/languageHelper';
+import { StarterDeck, getStarterDecksForLanguage } from '../data/starterDecks';
+import { TabType } from './Navbar';
+import { Button, Card, SectionLabel, Segmented, Select } from './ui';
 
 interface HomeScreenProps {
   items: VocabularyItem[];
@@ -44,608 +23,276 @@ interface HomeScreenProps {
   folders: VocabularyFolder[];
   settings: UserSettings;
   stats: StatsSummary;
-  activeProfile?: UserProfile;
-  onOpenProfileModal?: () => void;
-  onStartReview: (
-    options:
-      | {
-          durationMinutes?: number;
-          targetWordsCount?: number;
-          mode?: 'time' | 'count';
-          collectionId?: string;
-          folderId?: string;
-          studyDirection?: StudyDirection;
-        }
-      | number
-  ) => void;
-  onNavigateTab: (tab: 'library' | 'import' | 'stats' | 'settings') => void;
-  onSelectCollection: (collectionId: string) => void;
-  onUpdateDailyGoal?: (newGoal: number, newMode?: 'time' | 'count') => void;
+  activeProfile: UserProfile;
+  onOpenProfileModal: () => void;
+  onStart: (options: SessionOptions) => void;
+  onNavigateTab: (tab: TabType) => void;
+  onOpenCollection: (collectionId: string) => void;
+  onImportDeck: (deck: StarterDeck) => void;
 }
+
+const SECONDS_PER_CARD = 8;
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
   items,
   memoryStateMap,
   collections,
-  folders = [],
+  folders,
   settings,
   stats,
   activeProfile,
   onOpenProfileModal,
-  onStartReview,
+  onStart,
   onNavigateTab,
-  onSelectCollection,
-  onUpdateDailyGoal,
+  onOpenCollection,
+  onImportDeck,
 }) => {
-  // Target language & dynamic directional labels (e.g. 일본어, 영어, 스페인어)
-  const targetLanguage = settings.sourceLanguage || activeProfile?.targetLanguage || 'ja';
-  const dirLabels = getDirectionLabels(targetLanguage);
+  const lang = getLanguageMeta(activeProfile.targetLanguage);
+  const [showOptions, setShowOptions] = useState(false);
+  const [collectionId, setCollectionId] = useState('all');
+  const [folderId, setFolderId] = useState('all');
+  const [direction, setDirection] = useState<StudyDirection>('en_to_ko');
 
-  // Category & Folder scope selection before starting review
-  const [selectedCollectionId, setSelectedCollectionId] = useState<string>('all');
-  const [selectedFolderId, setSelectedFolderId] = useState<string>('all');
-
-  // Study Direction: 'en_to_ko' (기본 외국어->한) | 'ko_to_en' (한->외국어 장기기억 인출) | 'context_cloze' (문맥 빈칸)
-  const [studyDirection, setStudyDirection] = useState<StudyDirection>('en_to_ko');
-
-  // Active study knob: 'time' (3/5/10 min) or 'count' (목표 단어)
-  const [activeMode, setActiveMode] = useState<'time' | 'count'>(
-    settings.preferredSessionMode || 'time'
+  const scope = { collectionId, folderId };
+  const summary = useMemo(
+    () => getTodaySummary(items, memoryStateMap, settings, scope),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [items, memoryStateMap, settings, collectionId, folderId]
   );
+  const todayCount = summary.dueNow + summary.newAllowanceLeft;
+  const minutes = Math.max(1, Math.round((todayCount * SECONDS_PER_CARD) / 60));
+  const scopedFolders = collectionId === 'all' ? folders : folders.filter(f => f.collectionId === collectionId);
+  const isCustomScope = collectionId !== 'all' || folderId !== 'all' || direction !== 'en_to_ko';
 
-  // Time mode state
-  const [selectedDuration, setSelectedDuration] = useState<3 | 5 | 10>(
-    settings.preferredSessionDuration || 5
-  );
-
-  // Target words knob (접속한 순간 원하는 학습량 조절)
-  const [targetWords, setTargetWords] = useState<number>(
-    settings.dailyWordGoal || settings.targetDailyReviews || 20
-  );
-  const { isInstalled } = usePWAInstall();
-  const [showInstallModal, setShowInstallModal] = useState(false);
-
-  // Available folders for the currently selected category
-  const availableFolders =
-    selectedCollectionId === 'all'
-      ? folders
-      : folders.filter(f => f.collectionId === selectedCollectionId);
-
-  // Filter items in the chosen scope to display counts
-  const scopedItems = items.filter(item => {
-    if (selectedCollectionId !== 'all' && item.collectionId !== selectedCollectionId) return false;
-    if (selectedFolderId !== 'all' && item.folderId !== selectedFolderId) return false;
-    return true;
-  });
-
-  // Calculate words in long-term memory within the selected scope
-  const longTermItemsInScope = scopedItems.filter(item => {
-    const st = memoryStateMap.get(item.id);
-    return isLongTermMemoryItem(item, st);
-  });
-  const longTermCount = longTermItemsInScope.length;
-
-  // Handle changing target words
-  const handleUpdateTargetWords = (newVal: number) => {
-    const clamped = Math.max(3, Math.min(100, newVal));
-    setTargetWords(clamped);
-    if (onUpdateDailyGoal) {
-      onUpdateDailyGoal(clamped, activeMode);
-    }
-  };
-
-  // Switch between Time Mode and Word Count Mode
-  const handleModeSwitch = (mode: 'time' | 'count') => {
-    setActiveMode(mode);
-    if (onUpdateDailyGoal) {
-      onUpdateDailyGoal(targetWords, mode);
-    }
-  };
-
-  // Generate real-time session plan based on selected Category + Folder + Mode + Direction
-  const sessionPlan: SessionPlan = generateSessionPlan(items, memoryStateMap, settings, {
-    mode: activeMode,
-    durationMinutes: selectedDuration,
-    targetWordsCount: targetWords,
-    collectionId: selectedCollectionId,
-    folderId: selectedFolderId,
-    studyDirection,
-  });
-
-  // Handle Dimension Selection
-  const handleSelectDimension = (dir: StudyDirection) => {
-    setStudyDirection(dir);
-    try {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } catch {
-      // Ignore scroll error in iframe
-    }
-  };
-
-  // Multidimensional Memory Strength percentages (default or calculated)
-  const recStrength = stats.recognitionVsProductionRatio?.recognition ?? 84;
-  const prodStrength = stats.recognitionVsProductionRatio?.production ?? 56;
-  const transStrength = stats.recognitionVsProductionRatio?.transfer ?? 42;
-
-  // Selected Scope Name
-  const selectedCollectionName =
-    selectedCollectionId === 'all'
-      ? '전체 카테고리'
-      : collections.find(c => c.id === selectedCollectionId)?.name || '단어장';
-  const selectedFolderName =
-    selectedFolderId === 'all'
-      ? '전체 폴더'
-      : folders.find(f => f.id === selectedFolderId)?.name || '폴더';
-
-  // Preset word counts
-  const wordPresets = [10, 15, 20, 30, 50];
+  const today = new Intl.DateTimeFormat('ko-KR', { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date());
+  const startOpts: SessionOptions = { collectionId, folderId, direction };
 
   return (
-    <div className="pb-24 pt-4 px-4 max-w-md mx-auto animate-in fade-in duration-300">
-      {/* Friendly Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <span className="text-xs font-semibold text-indigo-600 tracking-wider uppercase">
-            VocaCurve · {dirLabels.name}
-          </span>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-1.5">
-            안녕하세요, {activeProfile?.name || settings.userName || '학습자'}님 👋
+    <div className="vc-enter">
+      <header className="flex items-start justify-between gap-3 pt-6 pb-5">
+        <div className="min-w-0">
+          <p className="text-sm text-muted">{today}</p>
+          <h1 className="text-[26px] leading-tight font-bold tracking-tight mt-0.5 truncate">
+            {activeProfile.name}님, 안녕하세요
           </h1>
         </div>
+        <button
+          onClick={onOpenProfileModal}
+          className="shrink-0 mt-1 h-9 px-3 rounded-full border border-line bg-surface text-sm text-ink-2 hover:border-line-strong"
+          title="학습자·언어 바꾸기"
+        >
+          {lang.name}
+        </button>
+      </header>
 
-        {onOpenProfileModal && (
-          <button
-            onClick={onOpenProfileModal}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/50 shadow-xs rounded-2xl text-xs font-bold text-slate-700 transition-all cursor-pointer active:scale-95"
-            title="계정 전환 및 학습 언어 변경"
-          >
-            <span className="text-sm">{dirLabels.meta.flag}</span>
-            <span className="max-w-[70px] truncate text-slate-900">
-              {activeProfile?.name || settings.userName || '학습자'}
-            </span>
-            <span className="text-[10px] text-indigo-700 font-semibold bg-indigo-50 px-1.5 py-0.5 rounded-md">
-              {dirLabels.name}
-            </span>
-          </button>
-        )}
-      </div>
-
-      {/* MAIN STUDY CONTROL PANEL (카테고리/폴더 선택 + 시간/목표 단어 조절 + 즉시 시작) */}
-      <div className="relative overflow-hidden bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-3xl p-5 text-white shadow-xl shadow-indigo-950/25 mb-6 border border-slate-800">
-        <div className="absolute top-0 right-0 -mr-10 -mt-10 w-48 h-48 rounded-full bg-indigo-500/20 blur-2xl pointer-events-none" />
-
-        <div className="relative z-10 space-y-4">
-          {/* STEP 1: 학습 범위 선택 (카테고리 및 폴더) */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold text-indigo-300 flex items-center gap-1.5 uppercase tracking-wider">
-                <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                1. 학습 범위 선택
-              </span>
-              <span className="text-[11px] text-slate-400 font-medium">
-                선택 범위: <strong className="text-white">{scopedItems.length}단어</strong>
-              </span>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              {/* Category Dropdown */}
-              <div>
-                <label className="text-[10px] text-slate-400 block mb-1">카테고리 (단어장)</label>
-                <select
-                  value={selectedCollectionId}
-                  onChange={e => {
-                    setSelectedCollectionId(e.target.value);
-                    setSelectedFolderId('all'); // reset folder when category changes
-                  }}
-                  className="w-full py-2 px-2.5 bg-white/10 border border-white/15 rounded-xl text-xs text-white font-medium focus:outline-none focus:ring-1 focus:ring-indigo-400 cursor-pointer"
-                >
-                  <option value="all" className="bg-slate-900 text-white">
-                    📚 전체 카테고리
-                  </option>
-                  {collections.map(col => (
-                    <option key={col.id} value={col.id} className="bg-slate-900 text-white">
-                      {col.name}
-                    </option>
-                  ))}
-                </select>
+      {/* ---------- Today card ---------- */}
+      {items.length === 0 ? (
+        <EmptyStart
+          decks={getStarterDecksForLanguage(activeProfile.targetLanguage)}
+          onAdd={() => onNavigateTab('import')}
+          onImportDeck={onImportDeck}
+        />
+      ) : (
+        <Card className="p-5">
+          {todayCount > 0 ? (
+            <>
+              <p className="text-sm font-medium text-muted">오늘 할 일</p>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-[44px] leading-none font-bold tracking-tight tabular-nums">{todayCount}</span>
+                <span className="text-lg text-ink-2">단어</span>
+                <span className="ml-auto text-sm text-muted">약 {minutes}분</span>
               </div>
-
-              {/* Folder Dropdown */}
-              <div>
-                <label className="text-[10px] text-slate-400 block mb-1">폴더 (세부 항목)</label>
-                <select
-                  value={selectedFolderId}
-                  onChange={e => setSelectedFolderId(e.target.value)}
-                  className="w-full py-2 px-2.5 bg-white/10 border border-white/15 rounded-xl text-xs text-white font-medium focus:outline-none focus:ring-1 focus:ring-indigo-400 cursor-pointer"
+              <p className="text-[15px] text-ink-2 mt-3">
+                복습 {summary.dueNow}개 · 새 단어 {summary.newAllowanceLeft}개
+              </p>
+              <Button variant="primary" size="lg" block className="mt-5" onClick={() => onStart(startOpts)}>
+                <Play className="w-5 h-5" fill="currentColor" strokeWidth={0} />
+                시작하기
+              </Button>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium text-good">오늘 복습 완료</p>
+              <p className="text-[22px] font-bold mt-1 leading-snug">잘하셨어요. 오늘은 여기까지면 충분합니다.</p>
+              <p className="text-[15px] text-ink-2 mt-2">
+                {summary.nextDueAt
+                  ? `다음 복습은 ${formatDueAt(summary.nextDueAt)}에 돌아옵니다.`
+                  : '복습할 단어가 생기면 여기에 표시됩니다.'}
+              </p>
+              <div className="grid grid-cols-2 gap-2 mt-5">
+                <Button
+                  onClick={() => onStart({ ...startOpts, extraNew: 5 })}
+                  disabled={summary.newAvailable === 0}
+                  title={summary.newAvailable === 0 ? '남은 새 단어가 없습니다' : undefined}
                 >
-                  <option value="all" className="bg-slate-900 text-white">
-                    📁 전체 폴더
-                  </option>
-                  {availableFolders.map(f => (
-                    <option key={f.id} value={f.id} className="bg-slate-900 text-white">
-                      📁 {f.name}
-                    </option>
-                  ))}
-                </select>
+                  <Plus className="w-4 h-4" /> 새 단어 5개
+                </Button>
+                <Button onClick={() => onStart({ ...startOpts, practice: true })}>약한 단어 연습</Button>
               </div>
-            </div>
-          </div>
+            </>
+          )}
 
-          {/* STEP 2: 세션 분량 조절 (시간 모드 vs 목표 단어) */}
-          <div className="pt-2 border-t border-white/10">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-bold text-indigo-300 flex items-center gap-1.5 uppercase tracking-wider">
-                <Target className="w-3.5 h-3.5 text-indigo-400" />
-                2. 학습 분량 설정
+          {/* Options (scope & direction) — collapsed by default */}
+          <div className="mt-4 pt-3 border-t border-line">
+            <button
+              onClick={() => setShowOptions(v => !v)}
+              className="w-full flex items-center justify-between text-sm text-muted py-1"
+              aria-expanded={showOptions}
+            >
+              <span>
+                {isCustomScope ? '범위·방식 변경됨' : '전체 단어장 · 뜻 떠올리기'}
               </span>
-
-              {/* Knob toggle: [시간 모드] vs [목표 단어] */}
-              <div className="flex items-center bg-white/10 p-0.5 rounded-xl">
-                <button
-                  onClick={() => handleModeSwitch('time')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                    activeMode === 'time'
-                      ? 'bg-white text-slate-950 shadow-xs'
-                      : 'text-white/70 hover:text-white'
-                  }`}
-                >
-                  시간 모드
-                </button>
-                <button
-                  onClick={() => handleModeSwitch('count')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                    activeMode === 'count'
-                      ? 'bg-white text-slate-950 shadow-xs'
-                      : 'text-white/70 hover:text-white'
-                  }`}
-                >
-                  목표 단어
-                </button>
-              </div>
-            </div>
-
-            {/* Content for Time Mode */}
-            {activeMode === 'time' ? (
-              <div className="space-y-2">
-                <div className="grid grid-cols-3 gap-2 bg-white/10 p-1 rounded-2xl">
-                  {([3, 5, 10] as const).map(mins => (
-                    <button
-                      key={mins}
-                      onClick={() => setSelectedDuration(mins)}
-                      className={`py-2 text-xs font-semibold rounded-xl transition-all cursor-pointer ${
-                        selectedDuration === mins
-                          ? 'bg-white text-slate-950 shadow-xs'
-                          : 'text-white/70 hover:text-white'
-                      }`}
-                    >
-                      {mins}분 모드
-                    </button>
-                  ))}
+              <ChevronDown className={`w-4 h-4 transition-transform ${showOptions ? 'rotate-180' : ''}`} />
+            </button>
+            {showOptions && (
+              <div className="space-y-3 pt-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <Select
+                    aria-label="단어장"
+                    value={collectionId}
+                    onChange={e => {
+                      setCollectionId(e.target.value);
+                      setFolderId('all');
+                    }}
+                  >
+                    <option value="all">전체 단어장</option>
+                    {collections.map(c => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </Select>
+                  <Select aria-label="폴더" value={folderId} onChange={e => setFolderId(e.target.value)}>
+                    <option value="all">전체 폴더</option>
+                    {scopedFolders.map(f => (
+                      <option key={f.id} value={f.id}>
+                        {f.name}
+                      </option>
+                    ))}
+                  </Select>
                 </div>
-                <p className="text-[11px] text-indigo-200/80 text-center">
-                  약 {selectedDuration}분 동안 부담 없이 {sessionPlan.totalCards}개 단어를 집중 인출합니다
+                <Segmented<StudyDirection>
+                  size="sm"
+                  value={direction}
+                  onChange={setDirection}
+                  options={[
+                    { value: 'en_to_ko', label: '뜻 떠올리기' },
+                    { value: 'ko_to_en', label: '단어 떠올리기' },
+                    { value: 'context_cloze', label: '문장 빈칸' },
+                  ]}
+                />
+                <p className="text-[13px] text-muted leading-relaxed">
+                  {direction === 'en_to_ko' && `${lang.name} 단어를 보고 한국어 뜻을 떠올립니다.`}
+                  {direction === 'ko_to_en' && `한국어 뜻을 보고 ${lang.name} 단어를 떠올립니다. 더 어렵지만 오래 남습니다.`}
+                  {direction === 'context_cloze' && '예문의 빈칸에 들어갈 단어를 떠올립니다. 예문이 있는 단어만 나옵니다.'}
                 </p>
-              </div>
-            ) : (
-              /* Content for Word Count Mode (목표 단어) */
-              <div className="space-y-2.5">
-                {/* Presets */}
-                <div className="flex items-center justify-between gap-1.5">
-                  {wordPresets.map(preset => (
-                    <button
-                      key={preset}
-                      onClick={() => handleUpdateTargetWords(preset)}
-                      className={`flex-1 py-1.5 text-xs font-bold rounded-xl transition-all border cursor-pointer ${
-                        targetWords === preset
-                          ? 'bg-indigo-500 border-indigo-400 text-white shadow-xs'
-                          : 'bg-white/10 border-white/15 text-white/80 hover:bg-white/20'
-                      }`}
-                    >
-                      {preset}개
-                    </button>
-                  ))}
-                </div>
-
-                {/* Stepper & Direct Editable Input */}
-                <div className="flex items-center justify-between bg-white/10 border border-white/15 rounded-2xl p-2">
-                  <button
-                    type="button"
-                    onClick={() => handleUpdateTargetWords(targetWords - 5)}
-                    disabled={targetWords <= 5}
-                    className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 disabled:opacity-30 active:scale-95 flex items-center justify-center text-white transition-all cursor-pointer"
-                    title="5개 줄이기"
-                  >
-                    <Minus className="w-3.5 h-3.5" />
-                  </button>
-
-                  <div className="flex items-center gap-1.5 text-center">
-                    <span className="text-xs text-indigo-200">목표 단어:</span>
-                    <input
-                      type="number"
-                      min={3}
-                      max={100}
-                      value={targetWords}
-                      onChange={e => {
-                        const val = parseInt(e.target.value, 10);
-                        if (!isNaN(val)) handleUpdateTargetWords(val);
-                      }}
-                      className="w-16 py-1 px-1 bg-white/20 text-white font-extrabold text-base text-center rounded-lg border border-white/20 focus:outline-none focus:border-indigo-400"
-                    />
-                    <span className="text-xs text-indigo-200 font-semibold">개 단어</span>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => handleUpdateTargetWords(targetWords + 5)}
-                    disabled={targetWords >= 100}
-                    className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 disabled:opacity-30 active:scale-95 flex items-center justify-center text-white transition-all cursor-pointer"
-                    title="5개 늘리기"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                  </button>
-                </div>
               </div>
             )}
           </div>
+        </Card>
+      )}
 
-          {/* STEP 3: 플래시카드 학습 시작 CTA Button */}
-          <div className="space-y-1.5 mt-2">
-            <button
-              onClick={() =>
-                onStartReview({
-                  mode: activeMode,
-                  durationMinutes: selectedDuration,
-                  targetWordsCount: targetWords,
-                  collectionId: selectedCollectionId,
-                  folderId: selectedFolderId,
-                  studyDirection,
-                })
-              }
-              className={`w-full py-4 text-white rounded-2xl font-bold text-base flex items-center justify-center gap-2 shadow-lg transition-all duration-200 cursor-pointer active:scale-[0.98] ${
-                studyDirection === 'ko_to_en'
-                  ? 'bg-purple-600 hover:bg-purple-500 shadow-purple-900/40'
-                  : studyDirection === 'context_cloze'
-                  ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-900/40'
-                  : 'bg-indigo-500 hover:bg-indigo-400 shadow-indigo-600/30'
-              }`}
-            >
-              <Play className="w-5 h-5 fill-white" />
-              <span>
-                {studyDirection === 'ko_to_en'
-                  ? `${dirLabels.koToForeign} 시작 (${sessionPlan.totalCards}개 단어)`
-                  : studyDirection === 'context_cloze'
-                  ? `문맥 빈칸 문제 시작 (${sessionPlan.totalCards}개 단어)`
-                  : selectedFolderId !== 'all'
-                  ? `[${selectedFolderName}] ${dirLabels.foreignToKoShort} 시작 (${sessionPlan.totalCards}개 단어)`
-                  : `${dirLabels.foreignToKo} 플래시카드 시작 (${sessionPlan.totalCards}개 단어)`}
+      {/* ---------- Small progress strip ---------- */}
+      {items.length > 0 && (
+        <button
+          onClick={() => onNavigateTab('stats')}
+          className="w-full mt-3 grid grid-cols-3 rounded-2xl border border-line bg-surface divide-x divide-line text-left"
+        >
+          <MiniStat
+            label="연속 학습"
+            value={
+              <span className="inline-flex items-center gap-1">
+                {stats.streakDays > 0 && <Flame className="w-4 h-4 text-warn" />}
+                {stats.streakDays}일
               </span>
-            </button>
+            }
+          />
+          <MiniStat label="오늘 복습" value={`${stats.todayReviewsCount}회`} />
+          <MiniStat label="장기 기억" value={`${stats.masteredWords}개`} />
+        </button>
+      )}
 
-            {/* Current Mode Badge / Indicator */}
-            <div className="flex items-center justify-center gap-1.5 text-[11px] text-indigo-200/90 font-medium">
-              <span>현재 모드:</span>
-              <strong className="text-white underline underline-offset-2">
-                {studyDirection === 'ko_to_en'
-                  ? `${dirLabels.koToForeign} (신규/학습 중 포함 전체 단어 인출)`
-                  : studyDirection === 'context_cloze'
-                  ? `문맥 / 실전문장 빈칸 문제`
-                  : `${dirLabels.foreignToKo} 플래시카드 (기본 인출)`}
-              </strong>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* SECTION: 다차원 기억 강도 매트릭스 (Multidimensional Memory Strengths) */}
-      <div className="bg-white rounded-3xl p-5 border border-slate-200/90 shadow-sm mb-6">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <div className="p-2 rounded-xl bg-indigo-50 text-indigo-600">
-              <BarChart3 className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-slate-900">다차원 기억 강도 분석</h3>
-              <p className="text-[11px] text-slate-400">클릭하여 해당 학습 모드로 상단 플래시카드를 전환합니다</p>
-            </div>
-          </div>
-          <span className="text-[11px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-100">
-            종합 유지율 {stats.averageRecallRate}%
-          </span>
-        </div>
-
-        <div className="space-y-3">
-          {/* 1. 외국어 -> 한 인출력 (기본 모드) */}
-          <div
-            onClick={() => handleSelectDimension('en_to_ko')}
-            className={`p-3.5 rounded-2xl transition-all cursor-pointer border ${
-              studyDirection === 'en_to_ko'
-                ? 'bg-indigo-50/90 border-indigo-400 ring-2 ring-indigo-500/20 shadow-xs'
-                : 'bg-slate-50/60 border-slate-200/70 hover:bg-indigo-50/40'
-            }`}
+      {/* ---------- Notebooks ---------- */}
+      {collections.length > 0 && items.length > 0 && (
+        <section className="mt-8">
+          <SectionLabel
+            right={
+              <button onClick={() => onNavigateTab('library')} className="text-[13px] text-accent font-medium">
+                전체 보기
+              </button>
+            }
           >
-            <div className="flex items-center justify-between mb-1.5">
-              <div className="flex items-center gap-1.5">
-                <span
-                  className={`w-2.5 h-2.5 rounded-full transition-all ${
-                    studyDirection === 'en_to_ko' ? 'bg-indigo-600 ring-4 ring-indigo-100' : 'bg-slate-400'
-                  }`}
-                />
-                <span className="text-xs font-bold text-slate-900">
-                  {dirLabels.foreignToKoFull}
-                </span>
-                {studyDirection === 'en_to_ko' && (
-                  <span className="px-1.5 py-0.5 rounded-md bg-indigo-600 text-[10px] font-bold text-white">
-                    활성화됨
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-1">
-                <span className="text-xs font-extrabold text-indigo-700">{recStrength}%</span>
-                <span className="text-[10px] text-indigo-600 font-semibold">
-                  {recStrength >= 80 ? '매우 우수' : recStrength >= 65 ? '안정권' : '복습 필요'}
-                </span>
-              </div>
-            </div>
-            <div className="w-full bg-indigo-100/70 h-2 rounded-full overflow-hidden mb-1.5">
-              <div
-                className="bg-indigo-600 h-full rounded-full transition-all duration-500"
-                style={{ width: `${recStrength}%` }}
-              />
-            </div>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              {dirLabels.foreignToKoDesc}
-            </p>
-          </div>
-
-          {/* 2. 한 -> 외국어 인출력 (모든 단어 인출 지원) */}
-          <div
-            onClick={() => handleSelectDimension('ko_to_en')}
-            className={`p-3.5 rounded-2xl transition-all border ${
-              studyDirection === 'ko_to_en'
-                ? 'bg-purple-50/90 border-purple-400 ring-2 ring-purple-500/20 shadow-xs cursor-pointer'
-                : 'bg-slate-50/60 border-slate-200/70 hover:bg-purple-50/40 cursor-pointer'
-            }`}
-          >
-            <div className="flex items-center justify-between mb-1.5">
-              <div className="flex items-center gap-1.5">
-                <span
-                  className={`w-2.5 h-2.5 rounded-full transition-all ${
-                    studyDirection === 'ko_to_en' ? 'bg-purple-600 ring-4 ring-purple-100' : 'bg-slate-400'
-                  }`}
-                />
-                <span className="text-xs font-bold text-slate-900">
-                  {dirLabels.koToForeignFull}
-                </span>
-                {studyDirection === 'ko_to_en' && (
-                  <span className="px-1.5 py-0.5 rounded-md bg-purple-600 text-[10px] font-bold text-white">
-                    활성화됨
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-1">
-                <span className="text-xs font-extrabold text-purple-700">{prodStrength}%</span>
-                <span className="text-[10px] text-purple-600 font-semibold">
-                  {scopedItems.length}개 단어 전체 지원
-                </span>
-              </div>
-            </div>
-            <div className="w-full bg-purple-100/70 h-2 rounded-full overflow-hidden mb-1.5">
-              <div
-                className="bg-purple-600 h-full rounded-full transition-all duration-500"
-                style={{ width: `${prodStrength}%` }}
-              />
-            </div>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              {dirLabels.koToForeignDesc}
-            </p>
-          </div>
-
-          {/* 3. 문맥 및 실전문장 전이력 (단어 빈칸 문제) */}
-          <div
-            onClick={() => handleSelectDimension('context_cloze')}
-            className={`p-3.5 rounded-2xl transition-all border ${
-              studyDirection === 'context_cloze'
-                ? 'bg-emerald-50/90 border-emerald-400 ring-2 ring-emerald-500/20 shadow-xs cursor-pointer'
-                : 'bg-slate-50/60 border-slate-200/70 hover:bg-emerald-50/40 cursor-pointer'
-            }`}
-          >
-            <div className="flex items-center justify-between mb-1.5">
-              <div className="flex items-center gap-1.5">
-                <span
-                  className={`w-2.5 h-2.5 rounded-full transition-all ${
-                    studyDirection === 'context_cloze' ? 'bg-emerald-600 ring-4 ring-emerald-100' : 'bg-slate-400'
-                  }`}
-                />
-                <span className="text-xs font-bold text-slate-900">
-                  문맥 / 실전문장 전이력 (단어 빈칸 문제)
-                </span>
-                {studyDirection === 'context_cloze' && (
-                  <span className="px-1.5 py-0.5 rounded-md bg-emerald-600 text-[10px] font-bold text-white">
-                    활성화됨
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-1">
-                <span className="text-xs font-extrabold text-emerald-700">{transStrength}%</span>
-                <span className="text-[10px] text-emerald-600 font-semibold">
-                  장기기억 {longTermCount}단어
-                </span>
-              </div>
-            </div>
-            <div className="w-full bg-emerald-100/70 h-2 rounded-full overflow-hidden mb-1.5">
-              <div
-                className="bg-emerald-600 h-full rounded-full transition-all duration-500"
-                style={{ width: `${transStrength}%` }}
-              />
-            </div>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              실전문장의 빈칸 [ ___ ]에 들어갈 단어를 맞추는 문맥 응용 학습입니다. 클릭 시 상단 버튼이 문맥 빈칸 학습으로 전환됩니다.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Vocabulary Collections Glance */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between mb-3 px-1">
-          <h2 className="text-sm font-bold text-slate-900">학습 단어장 및 폴더</h2>
-          <button
-            onClick={() => onNavigateTab('library')}
-            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium flex items-center gap-0.5 cursor-pointer"
-          >
-            단어장에서 관리하기 <ChevronRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        <div className="space-y-2.5">
-          {collections.map(col => {
-            const colItems = items.filter(i => i.collectionId === col.id);
-            const colFolders = folders.filter(f => f.collectionId === col.id);
-            return (
-              <div
-                key={col.id}
-                onClick={() => {
-                  onSelectCollection(col.id);
-                  onNavigateTab('library');
-                }}
-                className="bg-white hover:bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 flex items-center justify-between transition-all cursor-pointer shadow-sm active:scale-[0.99]"
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className="w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold text-sm"
-                    style={{ backgroundColor: col.color || '#4F46E5' }}
-                  >
-                    <BookOpen className="w-5 h-5 text-white/90" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-slate-900 leading-snug">{col.name}</h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      {colFolders.length}개 폴더 · {colItems.length}개 단어 보관 중
+            단어장
+          </SectionLabel>
+          <Card className="divide-y divide-line overflow-hidden">
+            {collections.map(col => {
+              const count = items.filter(i => i.collectionId === col.id).length;
+              const due = getTodaySummary(items, memoryStateMap, settings, { collectionId: col.id }).dueNow;
+              return (
+                <button
+                  key={col.id}
+                  onClick={() => onOpenCollection(col.id)}
+                  className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-sunken"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[15px] font-medium truncate">{col.name}</p>
+                    <p className="text-[13px] text-muted mt-0.5">
+                      {count}단어{due > 0 ? ` · 복습 ${due}` : ''}
                     </p>
                   </div>
-                </div>
-                <ChevronRight className="w-4 h-4 text-slate-300" />
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Gentle Memory Principle Card (Ebbinghaus Context) */}
-      <div className="bg-slate-50 border border-slate-200/70 rounded-2xl p-4 text-xs text-slate-600">
-        <div className="flex items-center gap-1.5 font-semibold text-slate-800 mb-1">
-          <Brain className="w-3.5 h-3.5 text-indigo-600" />
-          에빙하우스 망각 곡선 설계
-        </div>
-        <p className="leading-relaxed text-slate-500">
-          단어장에서 단어를 누르면 망각곡선 상에서 현재 위치와 기억 유지율을 확인할 수 있습니다. 플래시카드로 뒤집어보며 자가 채점을 진행하면 기억 안정성이 대폭 상승합니다.
-        </p>
-      </div>
-
-      {/* Mobile App Install & APK Modal */}
-      {showInstallModal && (
-        <MobileAppInstallModal onClose={() => setShowInstallModal(false)} />
+                  <ChevronRight className="w-4 h-4 text-muted" />
+                </button>
+              );
+            })}
+          </Card>
+        </section>
       )}
     </div>
   );
 };
+
+const MiniStat: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+  <div className="px-4 py-3">
+    <p className="text-[12px] text-muted">{label}</p>
+    <p className="text-[17px] font-semibold mt-0.5 tabular-nums">{value}</p>
+  </div>
+);
+
+const EmptyStart: React.FC<{
+  decks: StarterDeck[];
+  onAdd: () => void;
+  onImportDeck: (deck: StarterDeck) => void;
+}> = ({ decks, onAdd, onImportDeck }) => (
+  <Card className="p-5">
+    <p className="text-sm font-medium text-muted">시작하기</p>
+    <p className="text-[22px] font-bold mt-1 leading-snug">외울 단어를 먼저 넣어 주세요</p>
+    <p className="text-[15px] text-ink-2 mt-2 leading-relaxed">
+      단어를 넣으면 잊어버리기 직전에 다시 보여 드립니다. 하루 몇 분이면 충분합니다.
+    </p>
+    <Button variant="primary" size="lg" block className="mt-5" onClick={onAdd}>
+      <Plus className="w-5 h-5" /> 내 단어 추가하기
+    </Button>
+    {decks.length > 0 && (
+      <div className="mt-5">
+        <p className="text-[13px] text-muted mb-2">또는 기본 단어장으로 시작</p>
+        <div className="space-y-2">
+          {decks.map(deck => (
+            <button
+              key={deck.id}
+              onClick={() => onImportDeck(deck)}
+              className="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-line hover:border-line-strong text-left"
+            >
+              <span className="min-w-0">
+                <span className="block text-[15px] font-medium">{deck.title}</span>
+                <span className="block text-[13px] text-muted">
+                  {deck.description} · {deck.items.length}단어
+                </span>
+              </span>
+              <ChevronRight className="w-4 h-4 text-muted shrink-0" />
+            </button>
+          ))}
+        </div>
+      </div>
+    )}
+  </Card>
+);

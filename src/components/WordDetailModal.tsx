@@ -1,334 +1,278 @@
 import React, { useState } from 'react';
-import { X, Volume2, Brain, Sparkles, Clock, CheckCircle2, AlertCircle, Edit3, Trash2, Folder } from 'lucide-react';
+import { Loader2, Sparkles, Trash2, Volume2 } from 'lucide-react';
 import { MemoryState, VocabularyFolder, VocabularyItem } from '../types/database';
+import { MS_PER_DAY, calculateHlrRecall } from '../lib/scienceScheduler';
+import { formatDueAt, getMemoryView } from '../lib/memoryEngine';
 import { speakEnglishWord } from '../lib/sound';
-import { getDirectionLabels, getLanguageMeta, isRTL } from '../lib/languageHelper';
-import { EbbinghausCurveChart } from './EbbinghausCurveChart';
-import {
-  getTermFontSizeClass,
-  getBackMeaningFontSizeClass,
-  getSentenceFontSizeClass,
-} from '../lib/typographyHelper';
+import { analyzeWordWithAI } from '../lib/aiClient';
+import { Button, Field, Notice, Select, Sheet, StatusTag, TermText, inputClass } from './ui';
 
 interface WordDetailModalProps {
   item: VocabularyItem;
   memoryState?: MemoryState;
-  folders?: VocabularyFolder[];
+  folders: VocabularyFolder[];
   onClose: () => void;
   onUpdate: (updated: VocabularyItem) => void;
   onDelete: (id: string) => void;
 }
 
-export const WordDetailModal: React.FC<WordDetailModalProps> = ({
-  item,
-  memoryState,
-  folders = [],
-  onClose,
-  onUpdate,
-  onDelete,
-}) => {
-  const dirLabels = getDirectionLabels(item.sourceLanguage);
-  const langMeta = getLanguageMeta(item.sourceLanguage);
+export const WordDetailModal: React.FC<WordDetailModalProps> = ({ item, memoryState, folders, onClose, onUpdate, onDelete }) => {
+  const view = getMemoryView(memoryState);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({
+    userMeaning: item.userMeaning,
+    alternative: (item.alternativeMeanings || []).join(', '),
+    partOfSpeech: item.partOfSpeech || '',
+    pronunciation: item.pronunciation || '',
+    exampleEn: item.exampleSentences?.[0]?.en || '',
+    exampleKo: item.exampleSentences?.[0]?.ko || '',
+  });
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const collectionFolders = folders.filter(f => f.collectionId === item.collectionId);
+  const example = item.exampleSentences?.[0];
 
-  const [isEditing, setIsEditing] = useState(false);
-  const [editMeaning, setEditMeaning] = useState(item.userMeaning);
-  const [editPartOfSpeech, setEditPartOfSpeech] = useState(item.partOfSpeech || '');
-  const [selectedFolderId, setSelectedFolderId] = useState<string>(item.folderId || '');
-
-  const handleSaveEdit = () => {
+  const save = () => {
     onUpdate({
       ...item,
-      userMeaning: editMeaning.trim(),
-      partOfSpeech: editPartOfSpeech.trim() || undefined,
-      folderId: selectedFolderId || undefined,
+      userMeaning: draft.userMeaning.trim() || item.userMeaning,
+      alternativeMeanings: draft.alternative
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean),
+      partOfSpeech: draft.partOfSpeech.trim() || undefined,
+      pronunciation: draft.pronunciation.trim() || undefined,
+      exampleSentences: draft.exampleEn.trim()
+        ? [
+            {
+              id: item.exampleSentences?.[0]?.id || `ex_${Date.now()}`,
+              source: 'user',
+              en: draft.exampleEn.trim(),
+              ko: draft.exampleKo.trim(),
+              clozeBlank: item.term,
+            },
+          ]
+        : [],
     });
-    setIsEditing(false);
+    setEditing(false);
   };
 
-  const handleFolderChange = (newFolderId: string) => {
-    setSelectedFolderId(newFolderId);
-    onUpdate({
-      ...item,
-      folderId: newFolderId || undefined,
-    });
-  };
-
-  const currentFolder = folders.find(f => f.id === (item.folderId || selectedFolderId));
-
-  const getStatusBadge = () => {
-    const status = memoryState?.status || 'new';
-    switch (status) {
-      case 'mastered':
-        return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">장기 기억</span>;
-      case 'retaining':
-        return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-800">기억 중</span>;
-      case 'learning':
-        return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">학습 중</span>;
-      default:
-        return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700">새 단어</span>;
+  const enrich = async () => {
+    setAiBusy(true);
+    setAiError(null);
+    const res = await analyzeWordWithAI(item.term, item.userMeaning, item.sourceLanguage);
+    setAiBusy(false);
+    if (!res.ok) {
+      setAiError(res.error);
+      return;
     }
+    const d = res.data;
+    onUpdate({
+      ...item,
+      partOfSpeech: item.partOfSpeech || d.partOfSpeech || undefined,
+      pronunciation: item.pronunciation || d.pronunciation || undefined,
+      alternativeMeanings: item.alternativeMeanings?.length ? item.alternativeMeanings : d.alternativeMeanings,
+      collocations: item.collocations?.length ? item.collocations : d.collocations,
+      distractors: d.distractors,
+      exampleSentences:
+        item.exampleSentences?.length || !d.exampleSentence
+          ? item.exampleSentences
+          : [{ id: `ex_ai_${Date.now()}`, source: 'ai', en: d.exampleSentence.en, ko: d.exampleSentence.ko, clozeBlank: item.term }],
+    });
   };
 
-  const formatNextReview = (nextReviewAt?: number) => {
-    if (!nextReviewAt) return '곧 복습 예정';
-    const diffHours = Math.round((nextReviewAt - Date.now()) / (1000 * 60 * 60));
-    if (diffHours <= 0) return '지금 복습 필요';
-    if (diffHours < 24) return `약 ${diffHours}시간 후`;
-    const days = Math.round(diffHours / 24);
-    return `${days}일 후`;
-  };
+  const missing = !item.pronunciation || !example || !item.partOfSpeech;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-white w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[90vh] overflow-y-auto shadow-2xl p-6 relative">
-        {/* Close Button */}
-        <button
-          onClick={onClose}
-          className="absolute top-5 right-5 p-2 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
-        >
-          <X className="w-5 h-5" />
-        </button>
-
-        {/* Word Header */}
-        <div className="mb-5">
-          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-            <h2
-              className={`${
-                item.term.length > 22 ? 'text-xl' : item.term.length > 14 ? 'text-2xl' : 'text-3xl'
-              } font-bold tracking-tight text-slate-900 break-keep ${
-                isRTL(item.sourceLanguage) ? 'font-hebrew text-3xl sm:text-4xl font-medium tracking-wide' : ''
-              }`}
-              dir={isRTL(item.sourceLanguage) ? 'rtl' : 'ltr'}
-              lang={item.sourceLanguage}
-            >
-              {item.term}
-            </h2>
-            <button
-              onClick={() => speakEnglishWord(item.term, 0.95, item.sourceLanguage)}
-              className="p-1.5 rounded-full bg-indigo-50 text-indigo-600 hover:bg-indigo-100 active:scale-95 transition-all cursor-pointer"
-              title="발음 듣기"
-            >
-              <Volume2 className="w-5 h-5" />
-            </button>
-            <span className="text-base" title={langMeta.name}>{langMeta.flag}</span>
-            {getStatusBadge()}
+    <Sheet
+      title="단어 정보"
+      onClose={onClose}
+      footer={
+        editing ? (
+          <div className="grid grid-cols-2 gap-2">
+            <Button onClick={() => setEditing(false)}>취소</Button>
+            <Button variant="primary" onClick={save}>
+              저장
+            </Button>
           </div>
-
-          <div className="flex items-center gap-2 text-sm text-slate-500 flex-wrap">
-            {item.pronunciation && <span className="break-keep font-mono">{item.pronunciation}</span>}
-            {item.partOfSpeech && <span className="text-indigo-600 font-medium">[{item.partOfSpeech}]</span>}
-            
-            {/* Folder indicator & switcher */}
-            {folders.length > 0 && (
-              <div className="flex items-center gap-1 ml-auto text-xs">
-                <Folder className="w-3.5 h-3.5 text-slate-400" />
-                <select
-                  value={selectedFolderId}
-                  onChange={e => handleFolderChange(e.target.value)}
-                  className="bg-slate-100 border border-slate-200 text-slate-700 rounded-lg px-2 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 font-medium cursor-pointer"
-                >
-                  <option value="">(폴더 미지정)</option>
-                  {folders.map(f => (
-                    <option key={f.id} value={f.id}>
-                      📁 {f.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
+        ) : (
+          <div className="flex gap-2">
+            <Button
+              variant="danger"
+              aria-label="삭제"
+              onClick={() => {
+                if (confirm(`'${item.term}' 단어를 삭제할까요? 학습 기록도 함께 지워집니다.`)) {
+                  onDelete(item.id);
+                  onClose();
+                }
+              }}
+            >
+              <Trash2 className="w-4 h-4" />
+            </Button>
+            <Button block onClick={() => setEditing(true)}>
+              수정하기
+            </Button>
           </div>
+        )
+      }
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[30px] leading-tight font-medium">
+            <TermText term={item.term} lang={item.sourceLanguage} />
+          </p>
+          {(item.pronunciation || item.partOfSpeech) && (
+            <p className="text-[15px] text-muted mt-1">{[item.pronunciation, item.partOfSpeech].filter(Boolean).join(' · ')}</p>
+          )}
         </div>
+        <button
+          onClick={() => speakEnglishWord(item.term, 0.95, item.sourceLanguage)}
+          className="p-2 rounded-full text-muted hover:bg-sunken"
+          aria-label="발음 듣기"
+        >
+          <Volume2 className="w-5 h-5" />
+        </button>
+      </div>
 
-        {/* Meaning Sections */}
-        <div className="space-y-4 mb-6">
-          {/* User Meaning (Always preserved as primary) */}
-          <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                기본 뜻 (사용자 등록)
-              </span>
-              {!isEditing && (
-                <button
-                  onClick={() => setIsEditing(true)}
-                  className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-1 font-medium"
-                >
-                  <Edit3 className="w-3.5 h-3.5" /> 수정
-                </button>
-              )}
-            </div>
-
-            {isEditing ? (
-              <div className="space-y-2 mt-2">
-                <input
-                  type="text"
-                  value={editMeaning}
-                  onChange={e => setEditMeaning(e.target.value)}
-                  className="w-full px-3 py-2 text-base border border-indigo-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  placeholder="단어 뜻 입력"
-                />
-                <div className="flex justify-end gap-2 pt-1">
-                  <button
-                    onClick={() => setIsEditing(false)}
-                    className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-200 rounded-lg"
-                  >
-                    취소
-                  </button>
-                  <button
-                    onClick={handleSaveEdit}
-                    className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700"
-                  >
-                    저장
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <p className={`${getBackMeaningFontSizeClass(item.userMeaning)} font-semibold text-slate-900 break-keep leading-snug`}>{item.userMeaning}</p>
-            )}
-          </div>
-
-          {/* AI Suggested Meaning (Clearly distinguished) */}
-          {item.aiSuggestedMeaning && (
-            <div className="bg-gradient-to-br from-indigo-50/60 to-purple-50/40 border border-indigo-100 rounded-2xl p-4">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-700 mb-1">
-                <Sparkles className="w-3.5 h-3.5" /> AI 제안 의미
-              </div>
-              <p className="text-sm font-medium text-slate-800 break-keep leading-relaxed">{item.aiSuggestedMeaning}</p>
-              {item.alternativeMeanings && item.alternativeMeanings.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mt-2">
-                  {item.alternativeMeanings.map((alt, i) => (
-                    <span
-                      key={i}
-                      className="px-2 py-0.5 bg-white/80 border border-indigo-100 rounded-md text-xs text-indigo-900 break-keep"
-                    >
-                      {alt}
-                    </span>
-                  ))}
-                </div>
-              )}
+      {!editing ? (
+        <>
+          <p className="text-xl font-bold mt-4">{item.userMeaning}</p>
+          {item.alternativeMeanings && item.alternativeMeanings.length > 0 && (
+            <p className="text-[15px] text-ink-2 mt-1">{item.alternativeMeanings.join(', ')}</p>
+          )}
+          {example && (
+            <div className="mt-4 p-4 rounded-xl bg-surface border border-line">
+              <p className="font-serif text-[17px] leading-relaxed" dir="auto">{example.en}</p>
+              {example.ko && <p className="text-[14px] text-ink-2 mt-1.5">{example.ko}</p>}
             </div>
           )}
-
-          {/* Collocations */}
           {item.collocations && item.collocations.length > 0 && (
-            <div>
-              <span className="text-xs font-semibold text-slate-500 block mb-1.5">함께 쓰이는 연어 (Collocations)</span>
-              <div className="flex flex-wrap gap-2">
-                {item.collocations.map((col, i) => (
-                  <span key={i} className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium break-keep">
-                    {col}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Example Sentences */}
-          {item.exampleSentences && item.exampleSentences.length > 0 && (
-            <div className="space-y-2">
-              <span className="text-xs font-semibold text-slate-500 block">예문 (Context)</span>
-              {item.exampleSentences.map(ex => (
-                <div key={ex.id} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
-                  <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
-                    <span>{ex.source === 'user' ? '사용자 등록 예문' : 'AI 추천 예문'}</span>
-                    <button
-                      onClick={() => speakEnglishWord(ex.en, 0.9, item.sourceLanguage)}
-                      className="text-indigo-600 hover:text-indigo-700 p-0.5 cursor-pointer"
-                    >
-                      <Volume2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                  <p className={`${getSentenceFontSizeClass(ex.en)} font-medium text-slate-900 leading-snug break-keep`}>{ex.en}</p>
-                  <p className="text-xs text-slate-500 mt-1 break-keep leading-relaxed">{ex.ko}</p>
-                </div>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {item.collocations.map(c => (
+                <span key={c} className="px-2.5 py-1 rounded-lg bg-sunken text-sm text-ink-2 font-serif">
+                  {c}
+                </span>
               ))}
             </div>
           )}
-        </div>
 
-        {/* Spaced Repetition & Forgetting Curve Diagnostics */}
-        {memoryState && (
-          <div className="border-t border-slate-100 pt-4 mb-6 space-y-4">
-            {/* Visual Ebbinghaus Curve Chart */}
-            <EbbinghausCurveChart memoryState={memoryState} term={item.term} />
-
-            {/* Multidimensional Memory Strengths */}
-            <div>
-              <div className="flex items-center gap-1.5 mb-2.5">
-                <Brain className="w-4 h-4 text-indigo-600" />
-                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wide">
-                  다차원 기억 강도 (Multidimensional Memory)
-                </h3>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2">
-                <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-100">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] text-slate-500 font-medium">{dirLabels.foreignToKoShort} 인출</span>
-                    <span className="text-xs font-bold text-indigo-600">{memoryState.recognitionStrength}%</span>
-                  </div>
-                  <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
-                    <div
-                      className="bg-indigo-600 h-full rounded-full transition-all duration-300"
-                      style={{ width: `${memoryState.recognitionStrength}%` }}
-                    />
-                  </div>
-                  <span className="text-[9px] text-slate-400 mt-1 block">기본 단어 인출력</span>
-                </div>
-
-                <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-100">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] text-slate-500 font-medium">{dirLabels.koToForeignShort} 인출</span>
-                    <span className="text-xs font-bold text-purple-600">{memoryState.productionStrength}%</span>
-                  </div>
-                  <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
-                    <div
-                      className="bg-purple-600 h-full rounded-full transition-all duration-300"
-                      style={{ width: `${memoryState.productionStrength}%` }}
-                    />
-                  </div>
-                  <span className="text-[9px] text-slate-400 mt-1 block">능동 연상력</span>
-                </div>
-
-                <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-100">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] text-slate-500 font-medium">문맥/전이</span>
-                    <span className="text-xs font-bold text-emerald-600">{memoryState.transferStrength || 0}%</span>
-                  </div>
-                  <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
-                    <div
-                      className="bg-emerald-600 h-full rounded-full transition-all duration-300"
-                      style={{ width: `${memoryState.transferStrength || 0}%` }}
-                    />
-                  </div>
-                  <span className="text-[9px] text-slate-400 mt-1 block">예문 적용력</span>
-                </div>
-              </div>
+          {missing && (
+            <button
+              onClick={enrich}
+              disabled={aiBusy}
+              className="mt-4 inline-flex items-center gap-1.5 text-sm text-accent font-medium disabled:opacity-50"
+            >
+              {aiBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              AI로 발음·예문 채우기
+            </button>
+          )}
+          {aiError && (
+            <div className="mt-2">
+              <Notice tone="bad">{aiError}</Notice>
             </div>
+          )}
+
+          {/* Memory */}
+          <div className="mt-6 pt-5 border-t border-line">
+            <div className="flex items-center justify-between">
+              <StatusTag status={view.status} />
+              <span className="text-[13px] text-muted">다음 복습: {formatDueAt(view.nextDueAt)}</span>
+            </div>
+            {view.retention !== null ? (
+              <>
+                <p className="text-[15px] mt-3">
+                  지금 기억하고 있을 확률 <strong className="font-semibold tabular-nums">{Math.round(view.retention * 100)}%</strong>
+                </p>
+                <RetentionCurve halfLife={view.science.halfLife} lastReviewAt={view.science.lastReviewAt!} nextDueAt={view.nextDueAt} />
+                <p className="text-[12px] text-muted mt-1">
+                  {view.reviewCount}번 복습 · 망각곡선(반감기 {formatHalfLife(view.science.halfLife)}) 기준 추정치
+                </p>
+              </>
+            ) : (
+              <p className="text-[15px] text-ink-2 mt-3">아직 학습하지 않은 단어입니다. 오늘의 복습에서 새 단어로 나옵니다.</p>
+            )}
           </div>
-        )}
 
-        {/* Footer Actions */}
-        <div className="flex items-center justify-between pt-2 border-t border-slate-100">
-          <button
-            onClick={() => {
-              if (confirm(`'${item.term}' 단어를 단어장에서 삭제하시겠습니까?`)) {
-                onDelete(item.id);
-                onClose();
-              }
-            }}
-            className="text-xs text-rose-600 hover:text-rose-700 flex items-center gap-1 font-medium px-2 py-1.5 rounded-lg hover:bg-rose-50"
-          >
-            <Trash2 className="w-3.5 h-3.5" /> 단어 삭제
-          </button>
-
-          <button
-            onClick={onClose}
-            className="px-5 py-2 text-sm bg-slate-900 text-white rounded-xl font-medium hover:bg-slate-800 transition-colors"
-          >
-            확인
-          </button>
+          {collectionFolders.length > 0 && (
+            <div className="mt-5">
+              <Field label="폴더">
+                <Select value={item.folderId || ''} onChange={e => onUpdate({ ...item, folderId: e.target.value || undefined })}>
+                  <option value="">폴더 없음</option>
+                  {collectionFolders.map(f => (
+                    <option key={f.id} value={f.id}>
+                      {f.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="space-y-3 mt-4">
+          <Field label="뜻">
+            <input className={inputClass} value={draft.userMeaning} onChange={e => setDraft({ ...draft, userMeaning: e.target.value })} />
+          </Field>
+          <Field label="다른 뜻" hint="쉼표로 구분">
+            <input className={inputClass} value={draft.alternative} onChange={e => setDraft({ ...draft, alternative: e.target.value })} />
+          </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="품사">
+              <input className={inputClass} value={draft.partOfSpeech} onChange={e => setDraft({ ...draft, partOfSpeech: e.target.value })} />
+            </Field>
+            <Field label="발음">
+              <input className={inputClass} value={draft.pronunciation} onChange={e => setDraft({ ...draft, pronunciation: e.target.value })} />
+            </Field>
+          </div>
+          <Field label="예문">
+            <textarea
+              className={`${inputClass} h-20 py-2.5 font-serif`}
+              value={draft.exampleEn}
+              onChange={e => setDraft({ ...draft, exampleEn: e.target.value })}
+            />
+          </Field>
+          <Field label="예문 해석">
+            <input className={inputClass} value={draft.exampleKo} onChange={e => setDraft({ ...draft, exampleKo: e.target.value })} />
+          </Field>
         </div>
-      </div>
-    </div>
+      )}
+    </Sheet>
+  );
+};
+
+function formatHalfLife(days: number): string {
+  if (days < 1) return `${Math.max(1, Math.round(days * 24))}시간`;
+  if (days < 60) return `${Math.round(days)}일`;
+  return `${Math.round(days / 30)}개월`;
+}
+
+/** Predicted recall from the last review up to (and a bit past) the next review. */
+const RetentionCurve: React.FC<{ halfLife: number; lastReviewAt: number; nextDueAt: number | null }> = ({
+  halfLife,
+  lastReviewAt,
+  nextDueAt,
+}) => {
+  const now = Date.now();
+  const W = 320;
+  const H = 96;
+  const pad = 6;
+  const spanMs = Math.max((nextDueAt || now) - lastReviewAt, now - lastReviewAt, MS_PER_DAY) * 1.4;
+  const x = (t: number) => pad + ((t - lastReviewAt) / spanMs) * (W - pad * 2);
+  const y = (p: number) => pad + (1 - p) * (H - pad * 2);
+  const points: string[] = [];
+  for (let i = 0; i <= 40; i++) {
+    const t = lastReviewAt + (spanMs * i) / 40;
+    points.push(`${x(t).toFixed(1)},${y(calculateHlrRecall((t - lastReviewAt) / MS_PER_DAY, halfLife)).toFixed(1)}`);
+  }
+  const nowP = calculateHlrRecall((now - lastReviewAt) / MS_PER_DAY, halfLife);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-24 mt-3" role="img" aria-label="이 단어의 예상 망각곡선">
+      <line x1={pad} x2={W - pad} y1={y(0.85)} y2={y(0.85)} stroke="var(--line-strong)" strokeDasharray="3 4" />
+      <polyline points={points.join(' ')} fill="none" stroke="var(--accent)" strokeWidth="2" />
+      {nextDueAt && nextDueAt > lastReviewAt && (
+        <line x1={x(nextDueAt)} x2={x(nextDueAt)} y1={pad} y2={H - pad} stroke="var(--line-strong)" />
+      )}
+      <circle cx={x(now)} cy={y(nowP)} r="4.5" fill="var(--accent)" stroke="var(--surface)" strokeWidth="2" />
+    </svg>
   );
 };

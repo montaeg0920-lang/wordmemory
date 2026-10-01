@@ -44,12 +44,11 @@ export function getBackMeaningFontSizeClass(meaning: string | undefined): string
  * so long sentences scale down gracefully to keep words intact on lines without crowding.
  */
 export function getSentenceFontSizeClass(sentence: string | undefined): string {
-  if (!sentence) return 'text-base sm:text-lg';
+  if (!sentence) return 'text-lg';
   const len = sentence.trim().length;
-  if (len <= 55) return 'text-base sm:text-lg';
-  if (len <= 95) return 'text-sm sm:text-base';
-  if (len <= 140) return 'text-[13px] sm:text-sm';
-  return 'text-xs sm:text-[13px]';
+  if (len <= 60) return 'text-lg';
+  if (len <= 110) return 'text-base';
+  return 'text-[15px]';
 }
 
 /**
@@ -127,7 +126,7 @@ export const ClozeSentenceDisplay: React.FC<ClozeSentenceDisplayProps> = ({
       <span className={`break-keep inline leading-relaxed ${className}`}>
         {sentence}
         {' '}
-        <span className="inline-block whitespace-nowrap px-2 py-0.5 mx-1 rounded-lg bg-indigo-500/25 border border-indigo-400/40 text-indigo-300 font-bold tracking-wider select-none align-middle">
+        <span className="inline-block whitespace-nowrap min-w-[4ch] mx-1 border-b-2 border-ink text-transparent select-none align-baseline">
           [  _________  ]
         </span>
       </span>
@@ -141,7 +140,7 @@ export const ClozeSentenceDisplay: React.FC<ClozeSentenceDisplayProps> = ({
           return (
             <span
               key={idx}
-              className="inline-block whitespace-nowrap px-2 py-0.5 mx-1 rounded-lg bg-indigo-500/25 border border-indigo-400/40 text-indigo-300 font-bold tracking-wider select-none align-middle shadow-xs"
+              className="inline-block whitespace-nowrap min-w-[4ch] mx-1 border-b-2 border-ink text-transparent select-none align-baseline"
             >
               [  _________  ]
             </span>
@@ -168,7 +167,7 @@ export const HighlightedSentenceDisplay: React.FC<HighlightedSentenceDisplayProp
   sentence,
   term,
   className = '',
-  highlightClassName = 'text-emerald-400 font-extrabold underline decoration-emerald-400/60 inline-block whitespace-nowrap',
+  highlightClassName = 'font-semibold text-ink underline decoration-accent decoration-2 underline-offset-4 inline-block whitespace-nowrap',
 }) => {
   if (!sentence) return null;
   const cleanTerm = term.trim();
