@@ -1,6 +1,6 @@
 /**
  * High-Reliability File Import & Text Extraction Engine
- * Supports: XLSX, CSV, TXT, DOCX, and direct text paste.
+ * Supports: XLSX, CSV, TXT, DOCX and pasted text (PDF/photos go through Gemini).
  *
  * Implements:
  * 1. Intelligent column auto-detection (distinguishes Numbers, English terms, Korean meanings)
@@ -572,52 +572,115 @@ export function parseTextContent(
 }
 
 /**
- * Extracts plain text from DOCX ArrayBuffer
+ * Reads one file out of a ZIP archive (DOCX files are ZIP archives).
+ * Uses the browser's built-in DecompressionStream, so no extra library is needed.
+ */
+async function readZipEntry(buffer: ArrayBuffer, entryName: string): Promise<Uint8Array | null> {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  // Find "End of central directory" record (signature 0x06054b50) from the end.
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return null;
+  const entries = view.getUint16(eocd + 10, true);
+  let ptr = view.getUint32(eocd + 16, true);
+  const decoder = new TextDecoder();
+
+  for (let n = 0; n < entries; n++) {
+    if (view.getUint32(ptr, true) !== 0x02014b50) return null;
+    const method = view.getUint16(ptr + 10, true);
+    const compSize = view.getUint32(ptr + 20, true);
+    const nameLen = view.getUint16(ptr + 28, true);
+    const extraLen = view.getUint16(ptr + 30, true);
+    const commentLen = view.getUint16(ptr + 32, true);
+    const localOffset = view.getUint32(ptr + 42, true);
+    const name = decoder.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen));
+
+    if (name === entryName) {
+      const localNameLen = view.getUint16(localOffset + 26, true);
+      const localExtraLen = view.getUint16(localOffset + 28, true);
+      const start = localOffset + 30 + localNameLen + localExtraLen;
+      const data = bytes.subarray(start, start + compSize);
+      if (method === 0) return data;
+      if (method !== 8 || typeof DecompressionStream === 'undefined') return null;
+      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    ptr += 46 + nameLen + extraLen + commentLen;
+  }
+  return null;
+}
+
+function decodeXmlEntities(text: string): string {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Extracts plain text from a DOCX file. Table cells are joined with a tab so
+ * "word | meaning" tables are parsed as two columns.
  */
 export async function parseDocxFile(
   buffer: ArrayBuffer,
   fileName: string,
   existingItems: VocabularyItem[]
 ): Promise<ParsedImportResult> {
+  const empty: ParsedImportResult = { fileName, fileType: 'docx', totalParsed: 0, validCount: 0, duplicateCount: 0, rows: [] };
   try {
-    const decoder = new TextDecoder('utf-8', { fatal: false });
-    const textChunk = decoder.decode(buffer);
+    const xmlBytes = await readZipEntry(buffer, 'word/document.xml');
+    if (!xmlBytes) return empty;
+    const xml = new TextDecoder('utf-8').decode(xmlBytes);
 
-    const paragraphs = textChunk.match(/<w:p[\s>].*?<\/w:p>/g) || [];
-    const extractedLines: string[] = [];
-
-    for (const p of paragraphs) {
-      const textMatches = p.match(/<w:t[^>]*>(.*?)<\/w:t>/g) || [];
-      const line = textMatches
-        .map(t => t.replace(/<[^>]+>/g, ''))
-        .join(' ')
+    const lines: string[] = [];
+    const paragraphText = (p: string) =>
+      (p.match(/<w:tab\/>|<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>/g) || [])
+        .map(t => (t === '<w:tab/>' ? '\t' : decodeXmlEntities(t.replace(/<[^>]+>/g, ''))))
+        .join('')
         .trim();
-      if (line) {
-        extractedLines.push(line);
+
+    // Tables: one line per row, cells separated by tabs.
+    const withoutTables = xml.replace(/<w:tbl(?:\s[^>]*)?>[\s\S]*?<\/w:tbl>/g, table => {
+      for (const row of table.match(/<w:tr[\s>][\s\S]*?<\/w:tr>/g) || []) {
+        const cells = (row.match(/<w:tc(?:\s[^>]*)?>[\s\S]*?<\/w:tc>/g) || []).map(c =>
+          (c.match(/<w:p[\s>][\s\S]*?<\/w:p>/g) || []).map(paragraphText).join(' ').trim()
+        );
+        const line = cells.filter(Boolean).join('\t');
+        if (line) lines.push(line);
       }
+      return '';
+    });
+    for (const p of withoutTables.match(/<w:p[\s>][\s\S]*?<\/w:p>/g) || []) {
+      const line = paragraphText(p);
+      if (line) lines.push(line);
     }
 
-    if (extractedLines.length > 0) {
-      return parseTextContent(extractedLines.join('\n'), fileName, existingItems);
-    }
-
-    const cleanRaw = textChunk.replace(/[^\x20-\x7E\uAC00-\uD7A3\n\r]/g, ' ');
-    return parseTextContent(cleanRaw, fileName, existingItems);
+    const result = parseTextContent(lines.join('\n'), fileName, existingItems);
+    return { ...result, fileType: 'docx' };
   } catch (e) {
     console.error('DOCX parsing error:', e);
-    return {
-      fileName,
-      fileType: 'docx',
-      totalParsed: 0,
-      validCount: 0,
-      duplicateCount: 0,
-      rows: [],
-    };
+    return empty;
+  }
+}
+
+export class NeedsAIExtractionError extends Error {
+  constructor() {
+    super('NEEDS_AI_EXTRACTION');
   }
 }
 
 /**
- * Universal file processor entry point
+ * Universal file entry point. PDFs and images are read by Gemini instead
+ * (throws NeedsAIExtractionError so the caller can route them).
  */
 export async function processVocabularyFile(
   file: File,
@@ -625,15 +688,16 @@ export async function processVocabularyFile(
 ): Promise<ParsedImportResult> {
   const extension = file.name.split('.').pop()?.toLowerCase() || '';
 
+  if (extension === 'pdf' || file.type === 'application/pdf' || file.type.startsWith('image/')) {
+    throw new NeedsAIExtractionError();
+  }
   if (extension === 'xlsx' || extension === 'xls' || extension === 'csv') {
     const buffer = await file.arrayBuffer();
     const workbook = XLSX.read(buffer, { type: 'array' });
     return parseSpreadsheetData(workbook, file.name, existingItems);
-  } else if (extension === 'docx') {
-    const buffer = await file.arrayBuffer();
-    return parseDocxFile(buffer, file.name, existingItems);
-  } else {
-    const text = await file.text();
-    return parseTextContent(text, file.name, existingItems);
   }
+  if (extension === 'docx') {
+    return parseDocxFile(await file.arrayBuffer(), file.name, existingItems);
+  }
+  return parseTextContent(await file.text(), file.name, existingItems);
 }

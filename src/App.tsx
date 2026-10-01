@@ -1,311 +1,250 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Navbar, TabType } from './components/Navbar';
 import { HomeScreen } from './components/HomeScreen';
-import { ReviewScreen } from './components/ReviewScreen';
+import { ReviewScreen, SessionResult } from './components/ReviewScreen';
 import { SessionCompleteScreen } from './components/SessionCompleteScreen';
 import { VocabLibrary } from './components/VocabLibrary';
-import { FileImportScreen } from './components/FileImportScreen';
+import { AddWordsScreen } from './components/AddWordsScreen';
 import { StatsScreen } from './components/StatsScreen';
 import { SettingsScreen } from './components/SettingsScreen';
 import { UserProfileModal } from './components/UserProfileModal';
 import { WelcomeOnboardingModal } from './components/WelcomeOnboardingModal';
+import { Notice } from './components/ui';
 import {
+  STORAGE_ERROR_EVENT,
+  completeOnboarding,
+  createProfile,
+  deleteCollection,
+  deleteFolder,
+  deleteProfile,
+  deleteVocabularyItems,
+  getActiveProfile,
   getCollections,
   getFolders,
-  saveFolder,
-  deleteFolder,
-  getVocabularyItems,
-  getMemoryStates,
   getMemoryStateMap,
-  getUserSettings,
-  getStatsSummary,
-  saveMemoryState,
-  logReviewEvent,
-  saveVocabularyItems,
-  updateVocabularyItem,
-  deleteVocabularyItem,
-  deleteVocabularyItems,
-  moveItemsToFolder,
-  saveCollection,
-  deleteCollection,
-  updateUserSettings,
-  initializeStorageIfNeeded,
   getProfiles,
-  getActiveProfile,
-  setActiveProfileId,
-  createProfile,
-  updateProfile,
-  deleteProfile,
+  getStatsSummary,
+  getUserSettings,
+  getVocabularyItems,
   hasCompletedOnboarding,
-  completeOnboarding,
+  importStarterDeck,
+  initializeStorageIfNeeded,
+  logReviewEvent,
+  moveItemsToFolder,
+  requestPersistentStorage,
+  saveCollection,
+  saveFolder,
+  saveMemoryState,
+  saveVocabularyItems,
+  setActiveProfileId,
+  updateProfile,
+  updateUserSettings,
+  updateVocabularyItem,
 } from './lib/storage';
 import {
   LanguageCode,
   MemoryState,
   ReviewEvent,
-  StudyDirection,
   UserProfile,
   UserSettings,
   VocabularyCollection,
   VocabularyFolder,
   VocabularyItem,
 } from './types/database';
-import { generateSessionPlan } from './lib/memoryEngine';
+import { EMPTY_REASON_MESSAGE, SessionOptions, SessionPlan, generateSessionPlan } from './lib/memoryEngine';
+import { StarterDeck } from './data/starterDecks';
+
+initializeStorageIfNeeded();
+
+function applyTheme(theme: UserSettings['theme']) {
+  const dark =
+    theme === 'dark' ||
+    ((theme === 'system' || !theme) && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  document
+    .querySelectorAll('meta[name="theme-color"]')
+    .forEach(m => m.setAttribute('content', dark ? '#151412' : '#F7F5F0'));
+}
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('home');
-  const [selectedCollectionId, setSelectedCollectionId] = useState<string>('all');
+  const [libraryCollectionId, setLibraryCollectionId] = useState<string>('all');
 
-  // Application Data States
-  const [collections, setCollections] = useState<VocabularyCollection[]>([]);
-  const [folders, setFolders] = useState<VocabularyFolder[]>([]);
-  const [items, setItems] = useState<VocabularyItem[]>([]);
-  const [memoryStateMap, setMemoryStateMap] = useState<Map<string, MemoryState>>(new Map());
-  const [settings, setSettings] = useState<UserSettings>(getUserSettings());
-  const [stats, setStats] = useState(getStatsSummary());
+  const [collections, setCollections] = useState<VocabularyCollection[]>(getCollections);
+  const [folders, setFolders] = useState<VocabularyFolder[]>(getFolders);
+  const [items, setItems] = useState<VocabularyItem[]>(getVocabularyItems);
+  const [memoryStateMap, setMemoryStateMap] = useState<Map<string, MemoryState>>(getMemoryStateMap);
+  const [settings, setSettings] = useState<UserSettings>(getUserSettings);
+  const [stats, setStats] = useState(getStatsSummary);
 
-  // Multi-user Profile States
-  const [profiles, setProfiles] = useState<UserProfile[]>([]);
-  const [activeProfile, setActiveProfile] = useState<UserProfile>(getActiveProfile());
+  const [profiles, setProfiles] = useState<UserProfile[]>(getProfiles);
+  const [activeProfile, setActiveProfile] = useState<UserProfile>(getActiveProfile);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(!hasCompletedOnboarding());
 
-  // Active Review Session States
-  const [isReviewing, setIsReviewing] = useState(false);
-  const [isSessionComplete, setIsSessionComplete] = useState(false);
-  const [sessionDurationMinutes, setSessionDurationMinutes] = useState(5);
-  const [sessionStudyDirection, setSessionStudyDirection] = useState<StudyDirection>('en_to_ko');
-  const [sessionItems, setSessionItems] = useState<VocabularyItem[]>([]);
-  const [completedCardsCount, setCompletedCardsCount] = useState(0);
-  const [strengthenedCount, setStrengthenedCount] = useState(0);
-  const [completedEvents, setCompletedEvents] = useState<ReviewEvent[]>([]);
+  const [activePlan, setActivePlan] = useState<SessionPlan | null>(null);
+  const [lastPlanOptions, setLastPlanOptions] = useState<SessionOptions>({});
+  const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [storageError, setStorageError] = useState(false);
 
-  // Reload all storage state
-  const reloadData = () => {
+  const reloadData = useCallback(() => {
     initializeStorageIfNeeded();
-    const cols = getCollections();
-    const flds = getFolders();
-    const vocabs = getVocabularyItems();
-    const memMap = getMemoryStateMap();
-    const userSet = getUserSettings();
-    const stSummary = getStatsSummary();
-    const allProfiles = getProfiles();
-    const currProfile = getActiveProfile();
-
-    setCollections(cols);
-    setFolders(flds);
-    setItems(vocabs);
-    setMemoryStateMap(memMap);
-    setSettings(userSet);
-    setStats(stSummary);
-    setProfiles(allProfiles);
-    setActiveProfile(currProfile);
-  };
-
-  useEffect(() => {
-    reloadData();
+    setCollections(getCollections());
+    setFolders(getFolders());
+    setItems(getVocabularyItems());
+    setMemoryStateMap(getMemoryStateMap());
+    setSettings(getUserSettings());
+    setStats(getStatsSummary());
+    setProfiles(getProfiles());
+    setActiveProfile(getActiveProfile());
   }, []);
 
-  // Multi-user profile handlers
+  useEffect(() => {
+    requestPersistentStorage();
+    const onError = () => setStorageError(true);
+    window.addEventListener(STORAGE_ERROR_EVENT, onError);
+    return () => window.removeEventListener(STORAGE_ERROR_EVENT, onError);
+  }, []);
+
+  useEffect(() => {
+    applyTheme(settings.theme);
+    if (settings.theme !== 'system' && settings.theme) return;
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
+    const onChange = () => applyTheme(settings.theme);
+    mq?.addEventListener?.('change', onChange);
+    return () => mq?.removeEventListener?.('change', onChange);
+  }, [settings.theme]);
+
+  // Refresh "due" counts when the user comes back to the app.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !activePlan) {
+        setMemoryStateMap(getMemoryStateMap());
+        setStats(getStatsSummary());
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [activePlan]);
+
+  /* ---------- profiles ---------- */
   const handleSelectProfile = (userId: string) => {
     setActiveProfileId(userId);
     setShowProfileModal(false);
     reloadData();
   };
-
-  const handleCreateProfile = (name: string, targetLanguage: LanguageCode) => {
-    createProfile(name, targetLanguage);
+  const handleCreateProfile = (name: string, lang: LanguageCode) => {
+    createProfile(name, lang);
     setShowProfileModal(false);
     reloadData();
   };
-
   const handleUpdateProfile = (userId: string, updates: Partial<UserProfile>) => {
     updateProfile(userId, updates);
     reloadData();
   };
-
   const handleDeleteProfile = (userId: string) => {
     deleteProfile(userId);
     reloadData();
   };
-
-  const handleCompleteOnboarding = (name: string, targetLanguage: LanguageCode) => {
-    completeOnboarding(name, targetLanguage);
+  const handleCompleteOnboarding = (name: string, lang: LanguageCode) => {
+    completeOnboarding(name, lang);
     setShowOnboarding(false);
     reloadData();
   };
 
-  // Start Review session
-  const handleStartReview = (
-    options:
-      | {
-          durationMinutes?: number;
-          targetWordsCount?: number;
-          mode?: 'time' | 'count';
-          collectionId?: string;
-          folderId?: string;
-          studyDirection?: StudyDirection;
-        }
-      | number = 5
-  ) => {
-    const studyDir = typeof options === 'object' && options?.studyDirection ? options.studyDirection : 'en_to_ko';
-    setSessionStudyDirection(studyDir);
+  /* ---------- sessions ---------- */
+  const startSession = (options: SessionOptions) => {
     const plan = generateSessionPlan(items, memoryStateMap, settings, options);
-
     if (plan.items.length === 0) {
-      if (studyDir === 'ko_to_en') {
-        alert('한국어 → 영어 인출은 장기기억으로 이동한 단어(학습 완료 및 숙련 단어)를 대상으로 합니다. 아직 장기기억 단어가 충분하지 않습니다. 기본 영→한 플래시카드로 먼저 학습해보세요!');
-      } else if (studyDir === 'context_cloze') {
-        alert('문맥 빈칸 문제는 장기기억으로 이동한 단어(학습 완료 및 숙련 단어)를 대상으로 합니다. 장기기억 단어가 아직 없습니다.');
-      } else {
-        alert('선택한 범위에 학습할 단어가 없습니다. 다른 폴더를 선택하거나 새 단어를 추가해보세요!');
-      }
+      setNotice(plan.emptyReason ? EMPTY_REASON_MESSAGE[plan.emptyReason] : '학습할 단어가 없습니다.');
       return;
     }
-
-    setSessionDurationMinutes(plan.estimatedMinutes);
-    setSessionItems(plan.items);
-    setIsReviewing(true);
-    setIsSessionComplete(false);
+    setNotice(null);
+    setLastPlanOptions(options);
+    setSessionResult(null);
+    setActivePlan(plan);
   };
 
-  // Review state save (immediate persistence)
-  const handleSaveState = (state: MemoryState, event: ReviewEvent) => {
+  const handleAnswer = (state: MemoryState, event: ReviewEvent) => {
     saveMemoryState(state);
     logReviewEvent(event);
-    setMemoryStateMap(prev => {
-      const next = new Map(prev);
-      next.set(state.vocabularyItemId, state);
-      return next;
-    });
+    setMemoryStateMap(prev => new Map(prev).set(state.vocabularyItemId, state));
+  };
+
+  const handleSessionEnd = (result: SessionResult) => {
+    setActivePlan(null);
+    setMemoryStateMap(getMemoryStateMap());
     setStats(getStatsSummary());
+    setSessionResult(result.reviewed > 0 ? result : null);
   };
 
-  // Review session completion
-  const handleFinishReviewSession = (
-    reviewedCount: number,
-    strengthened: number,
-    events: ReviewEvent[]
-  ) => {
-    setCompletedCardsCount(reviewedCount);
-    setStrengthenedCount(strengthened);
-    setCompletedEvents(events);
-    setIsReviewing(false);
-    setIsSessionComplete(true);
-    setStats(getStatsSummary());
-  };
-
-  // Close completion and return to home
-  const handleCloseSessionComplete = () => {
-    setIsSessionComplete(false);
+  /* ---------- words ---------- */
+  const handleSaveItems = (newItems: VocabularyItem[]) => {
+    const saved = saveVocabularyItems(newItems);
     reloadData();
+    return saved;
   };
-
-  // Add more review time or words from completion screen
-  const handleAddMoreReview = (
-    options:
-      | {
-          durationMinutes?: number;
-          targetWordsCount?: number;
-          mode?: 'time' | 'count';
-        }
-      | number
-  ) => {
-    setIsSessionComplete(false);
-    handleStartReview(options);
-  };
-
-  // Item modifications
-  const handleUpdateItem = (updated: VocabularyItem) => {
-    updateVocabularyItem(updated);
-    setItems(getVocabularyItems());
-  };
-
-  const handleDeleteItem = (id: string) => {
-    deleteVocabularyItem(id);
+  const handleImportDeck = (deck: StarterDeck) => {
+    const added = importStarterDeck(deck);
     reloadData();
-  };
-
-  const handleDeleteItems = (ids: string[]) => {
-    deleteVocabularyItems(ids);
-    reloadData();
-  };
-
-  const handleMoveItemsToFolder = (ids: string[], folderId?: string) => {
-    moveItemsToFolder(ids, folderId);
-    reloadData();
-  };
-
-  const handleAddItem = (newItem: VocabularyItem) => {
-    saveVocabularyItems([newItem]);
-    reloadData();
-  };
-
-  const handleImportComplete = (importedItems: VocabularyItem[]) => {
-    saveVocabularyItems(importedItems);
-    reloadData();
-  };
-
-  const handleCreateCollection = (newCol: VocabularyCollection) => {
-    saveCollection(newCol);
-    setCollections(getCollections());
-  };
-
-  const handleDeleteCollection = (id: string) => {
-    deleteCollection(id);
-    reloadData();
-  };
-
-  const handleCreateFolder = (newFld: VocabularyFolder) => {
-    saveFolder(newFld);
-    setFolders(getFolders());
-  };
-
-  const handleDeleteFolder = (id: string) => {
-    deleteFolder(id);
-    reloadData();
+    setNotice(`'${deck.title}'에서 ${added}개 단어를 불러왔습니다. 하루 ${settings.dailyNewWords ?? 10}개씩 새 단어로 나옵니다.`);
+    setCurrentTab('home');
   };
 
   const handleUpdateSettings = (partial: Partial<UserSettings>) => {
-    const updated = updateUserSettings(partial);
-    setSettings(updated);
+    setSettings(updateUserSettings(partial));
+    if (partial.userName || partial.sourceLanguage) reloadData();
   };
 
-  // Full Screen Review Flow
-  if (isReviewing) {
+  /* ---------- render ---------- */
+  if (activePlan) {
     return (
       <ReviewScreen
-        sessionItems={sessionItems}
-        allItems={items}
+        plan={activePlan}
         memoryStateMap={memoryStateMap}
         settings={settings}
-        durationMinutes={sessionDurationMinutes}
-        studyDirection={sessionStudyDirection}
-        onFinishSession={handleFinishReviewSession}
-        onCancel={() => setIsReviewing(false)}
-        onSaveState={handleSaveState}
+        onAnswer={handleAnswer}
+        onEnd={handleSessionEnd}
       />
     );
   }
 
-  // Session Complete Flow
-  if (isSessionComplete) {
+  if (sessionResult) {
     return (
       <SessionCompleteScreen
-        reviewedCardsCount={completedCardsCount}
-        strengthenedCount={strengthenedCount}
-        reviewEvents={completedEvents}
-        allItems={items}
-        onFinish={handleCloseSessionComplete}
-        onMoreReview={handleAddMoreReview}
+        result={sessionResult}
+        items={items}
+        memoryStateMap={memoryStateMap}
+        settings={settings}
+        scope={lastPlanOptions}
+        onHome={() => {
+          setSessionResult(null);
+          setCurrentTab('home');
+          reloadData();
+        }}
+        onStart={opts => startSession({ ...lastPlanOptions, practice: false, extraNew: 0, ...opts })}
       />
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 antialiased selection:bg-indigo-100 selection:text-indigo-900">
-      {/* Active Tab Screen */}
-      <main className="min-h-screen">
+    <div className="min-h-screen bg-paper text-ink">
+      <main className="max-w-md mx-auto px-4 pb-tabbar">
+        {storageError && (
+          <div className="pt-4">
+            <Notice tone="bad" onClose={() => setStorageError(false)}>
+              <strong className="font-semibold">저장에 실패했습니다.</strong> 기기 저장 공간이 부족하거나 브라우저가 저장을 막고
+              있습니다. 설정 → 백업 파일 받기로 지금 데이터를 저장해 두세요.
+            </Notice>
+          </div>
+        )}
+        {notice && currentTab === 'home' && (
+          <div className="pt-4">
+            <Notice onClose={() => setNotice(null)}>{notice}</Notice>
+          </div>
+        )}
+
         {currentTab === 'home' && (
           <HomeScreen
             items={items}
@@ -316,19 +255,13 @@ export default function App() {
             stats={stats}
             activeProfile={activeProfile}
             onOpenProfileModal={() => setShowProfileModal(true)}
-            onStartReview={handleStartReview}
-            onNavigateTab={tab => setCurrentTab(tab)}
-            onSelectCollection={colId => {
-              setSelectedCollectionId(colId);
+            onStart={startSession}
+            onNavigateTab={setCurrentTab}
+            onOpenCollection={id => {
+              setLibraryCollectionId(id);
               setCurrentTab('library');
             }}
-            onUpdateDailyGoal={(newGoal, newMode) => {
-              handleUpdateSettings({
-                dailyWordGoal: newGoal,
-                targetDailyReviews: newGoal,
-                ...(newMode ? { preferredSessionMode: newMode } : {}),
-              });
-            }}
+            onImportDeck={handleImportDeck}
           />
         )}
 
@@ -338,37 +271,57 @@ export default function App() {
             collections={collections}
             folders={folders}
             memoryStateMap={memoryStateMap}
-            selectedCollectionId={selectedCollectionId}
-            onUpdateItem={handleUpdateItem}
-            onDeleteItem={handleDeleteItem}
-            onDeleteItems={handleDeleteItems}
-            onMoveItemsToFolder={handleMoveItemsToFolder}
-            onAddItem={handleAddItem}
-            onCreateCollection={handleCreateCollection}
-            onDeleteCollection={handleDeleteCollection}
-            onCreateFolder={handleCreateFolder}
-            onDeleteFolder={handleDeleteFolder}
+            settings={settings}
+            initialCollectionId={libraryCollectionId}
+            onUpdateItem={item => {
+              updateVocabularyItem(item);
+              setItems(getVocabularyItems());
+            }}
+            onDeleteItems={ids => {
+              deleteVocabularyItems(ids);
+              reloadData();
+            }}
+            onMoveItems={(ids, folderId) => {
+              moveItemsToFolder(ids, folderId);
+              reloadData();
+            }}
+            onSaveCollection={col => {
+              saveCollection(col);
+              reloadData();
+            }}
+            onDeleteCollection={id => {
+              deleteCollection(id);
+              setLibraryCollectionId('all');
+              reloadData();
+            }}
+            onSaveFolder={f => {
+              saveFolder(f);
+              reloadData();
+            }}
+            onDeleteFolder={id => {
+              deleteFolder(id);
+              reloadData();
+            }}
+            onAddWords={() => setCurrentTab('import')}
             onReloadData={reloadData}
           />
         )}
 
         {currentTab === 'import' && (
-          <FileImportScreen
+          <AddWordsScreen
             collections={collections}
             folders={folders}
             existingItems={items}
-            onImportComplete={handleImportComplete}
-            onNavigateTab={tab => setCurrentTab(tab)}
+            settings={settings}
+            onSave={handleSaveItems}
+            onSaveCollection={col => {
+              saveCollection(col);
+              reloadData();
+            }}
           />
         )}
 
-        {currentTab === 'stats' && (
-          <StatsScreen
-            stats={stats}
-            items={items}
-            memoryStates={Array.from(memoryStateMap.values())}
-          />
-        )}
+        {currentTab === 'stats' && <StatsScreen stats={stats} />}
 
         {currentTab === 'settings' && (
           <SettingsScreen
@@ -376,12 +329,12 @@ export default function App() {
             activeProfile={activeProfile}
             onOpenProfileModal={() => setShowProfileModal(true)}
             onUpdateSettings={handleUpdateSettings}
-            onResetData={reloadData}
+            onImportDeck={handleImportDeck}
+            onDataChanged={reloadData}
           />
         )}
       </main>
 
-      {/* User Profile Switching & Creation Modal */}
       {showProfileModal && (
         <UserProfileModal
           profiles={profiles}
@@ -394,16 +347,14 @@ export default function App() {
         />
       )}
 
-      {/* First-time Onboarding Modal for Account Name & Starting Language */}
       {showOnboarding && (
         <WelcomeOnboardingModal
-          initialName={activeProfile?.name || ''}
-          initialLanguage={activeProfile?.targetLanguage || 'en'}
+          initialName={activeProfile.name === '학습자 1' ? '' : activeProfile.name}
+          initialLanguage={activeProfile.targetLanguage || 'en'}
           onComplete={handleCompleteOnboarding}
         />
       )}
 
-      {/* Mobile-first bottom tab bar */}
       <Navbar currentTab={currentTab} onTabChange={setCurrentTab} />
     </div>
   );
