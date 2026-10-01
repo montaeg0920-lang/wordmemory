@@ -379,7 +379,7 @@ export function generateSessionPlan(
 }
 
 export const EMPTY_REASON_MESSAGE: Record<EmptyReason, string> = {
-  no_words: '아직 단어가 없습니다. 단어를 추가하거나 기본 단어장을 불러와 주세요.',
+  no_words: '아직 단어가 없습니다. 먼저 단어를 추가해 주세요.',
   empty_scope: '선택한 단어장·폴더에 단어가 없습니다.',
   no_sentences: '예문이 있는 단어가 없어 문맥 빈칸 문제를 낼 수 없습니다.',
   all_done: '오늘 복습할 단어를 모두 끝냈습니다.',
