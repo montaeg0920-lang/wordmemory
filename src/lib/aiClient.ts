@@ -23,29 +23,47 @@ export interface ExtractedWord {
   pronunciation?: string;
 }
 
+import { ImagePrepError, prepareImageForUpload } from './imageTools';
+
 export type AIResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
+/** Friendly message + a short code in brackets so problems can be reported precisely. */
 function describeError(status: number, code?: string): string {
-  if (code === 'AI_NOT_CONFIGURED') return 'AI 기능이 설정되어 있지 않습니다. (Gemini API 키 확인 필요)';
-  if (status === 429 || code === 'RATE_LIMITED') return '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.';
-  if (status === 413) return '파일이 너무 큽니다. 8MB 이하로 줄여 주세요.';
-  if (code === 'INVALID_FILE') return '지원하지 않는 파일 형식입니다.';
-  return 'AI 분석에 실패했습니다. 인터넷 연결을 확인하고 다시 시도해 주세요.';
+  const tag = ` (오류 ${code || status || 'NETWORK'})`;
+  if (code === 'AI_NOT_CONFIGURED') return 'AI 기능이 설정되어 있지 않습니다. Gemini API 키를 확인해 주세요.' + tag;
+  if (status === 429 || code === 'RATE_LIMITED') return '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.' + tag;
+  if (status === 413 || code === 'TOO_LARGE') return '파일이 너무 큽니다. 페이지를 나누거나 더 작은 파일로 시도해 주세요.' + tag;
+  if (code === 'INVALID_FILE') return '이 파일은 읽을 수 없습니다.' + tag;
+  if (code === 'TIMEOUT') return '응답이 너무 오래 걸립니다. 사진을 한 장씩 넣거나 잠시 후 다시 시도해 주세요.' + tag;
+  if (code === 'NO_TEXT') return '글자를 찾지 못했습니다. 밝은 곳에서 글자가 크게 보이도록 다시 찍어 주세요.' + tag;
+  if (status === 0) return '인터넷 연결을 확인하고 다시 시도해 주세요.' + tag;
+  return 'AI 분석에 실패했습니다. 다시 시도해 주세요.' + tag;
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<AIResult<T>> {
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return { ok: false, error: describeError(res.status, data?.error) };
-    return { ok: true, data: data as T };
-  } catch {
-    return { ok: false, error: describeError(0) };
+async function postJson<T>(url: string, body: unknown, timeoutMs = 30000, retries = 1): Promise<AIResult<T>> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) return { ok: true, data: data as T };
+      // Retry once on temporary server errors.
+      if (res.status >= 500 && res.status !== 503 && attempt < retries) continue;
+      return { ok: false, error: describeError(res.status, data?.error) };
+    } catch (e) {
+      clearTimeout(timer);
+      if (attempt < retries) continue;
+      return { ok: false, error: describeError(0, (e as Error)?.name === 'AbortError' ? 'TIMEOUT' : undefined) };
+    }
   }
+  return { ok: false, error: describeError(0) };
 }
 
 export async function analyzeWordWithAI(
@@ -72,7 +90,7 @@ export async function analyzeWordWithAI(
   };
 }
 
-function fileToBase64(file: Blob): Promise<string> {
+function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -80,46 +98,94 @@ function fileToBase64(file: Blob): Promise<string> {
       resolve(result.slice(result.indexOf(',') + 1));
     };
     reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
 }
 
-/** Shrinks large photos before upload (phone photos are often 5–10MB). */
-async function downscaleImage(file: File, maxSide = 2000): Promise<Blob> {
-  if (!file.type.startsWith('image/') || file.type === 'image/heic' || file.type === 'image/heif') return file;
-  try {
-    const bitmap = await createImageBitmap(file);
-    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
-    if (scale === 1 && file.size < 3 * 1024 * 1024) return file;
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(bitmap.width * scale);
-    canvas.height = Math.round(bitmap.height * scale);
-    canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    return await new Promise<Blob>(resolve =>
-      canvas.toBlob(b => resolve(b || file), 'image/jpeg', 0.85)
-    );
-  } catch {
-    return file;
+const MAX_PDF_BYTES = 15 * 1024 * 1024;
+
+function cleanWords(words: ExtractedWord[]): ExtractedWord[] {
+  const seen = new Set<string>();
+  const out: ExtractedWord[] = [];
+  for (const w of words || []) {
+    const term = String(w?.term || '').trim();
+    const meaning = String(w?.meaning || '').trim();
+    if (!term || !meaning) continue;
+    const key = term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      term,
+      meaning,
+      partOfSpeech: w.partOfSpeech?.trim() || undefined,
+      pronunciation: w.pronunciation?.trim() || undefined,
+    });
   }
+  return out;
 }
 
 /** Sends a photo or PDF to Gemini and returns the vocabulary found in it. */
-export async function extractVocabularyFromFile(
-  file: File,
-  sourceLanguage: string
-): Promise<AIResult<ExtractedWord[]>> {
+export async function extractVocabularyFromFile(file: File, sourceLanguage: string): Promise<AIResult<ExtractedWord[]>> {
   const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-  const blob = isPdf ? file : await downscaleImage(file);
-  if (blob.size > 8 * 1024 * 1024) return { ok: false, error: describeError(413) };
-  const mimeType = isPdf ? 'application/pdf' : blob.type || 'image/jpeg';
-  const data = await fileToBase64(blob);
-  const res = await postJson<{ words: ExtractedWord[] }>('/api/ai/extract-vocab', {
-    mimeType,
-    data,
-    sourceLanguage,
-  });
+  let blob: Blob = file;
+  let mimeType = 'application/pdf';
+  if (isPdf) {
+    if (file.size > MAX_PDF_BYTES) return { ok: false, error: describeError(413) };
+  } else {
+    try {
+      const prepared = await prepareImageForUpload(file);
+      blob = prepared.blob;
+      mimeType = prepared.mimeType;
+    } catch (e) {
+      const code = e instanceof ImagePrepError ? e.code : 'DECODE_FAILED';
+      return {
+        ok: false,
+        error:
+          code === 'HEIC_UNSUPPORTED'
+            ? '이 브라우저는 아이폰 HEIC 사진을 열 수 없어요. 아이폰 설정 → 카메라 → 포맷 → "높은 호환성"으로 바꾸거나 스크린샷으로 넣어 주세요. (오류 HEIC)'
+            : describeError(413, 'TOO_LARGE'),
+      };
+    }
+  }
+  const data = await blobToBase64(blob);
+  const res = await postJson<{ words: ExtractedWord[] }>(
+    '/api/ai/extract-vocab',
+    { mimeType, data, sourceLanguage },
+    isPdf ? 120000 : 60000
+  );
+  if (!res.ok) return res;
+  const words = cleanWords(res.data.words);
+  if (words.length === 0) return { ok: false, error: describeError(200, 'NO_TEXT') };
+  return { ok: true, data: words };
+}
+
+/** Lets Gemini pick out word–meaning pairs from messy text (documents, notes, slides). */
+export async function extractVocabularyFromText(text: string, sourceLanguage: string): Promise<AIResult<ExtractedWord[]>> {
+  const trimmed = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 60000);
+  if (!trimmed) return { ok: false, error: describeError(200, 'NO_TEXT') };
+  const res = await postJson<{ words: ExtractedWord[] }>('/api/ai/extract-vocab', { text: trimmed, sourceLanguage }, 90000);
+  if (!res.ok) return res;
+  const words = cleanWords(res.data.words);
+  if (words.length === 0) return { ok: false, error: describeError(200, 'NO_TEXT') };
+  return { ok: true, data: words };
+}
+
+export interface StarterWord extends ExtractedWord {
+  exampleEn?: string;
+  exampleKo?: string;
+}
+
+/** Asks Gemini for a beginner word list in one language (for languages without a built-in deck). */
+export async function generateStarterDeck(
+  sourceLanguage: string,
+  level: 'beginner' | 'elementary' | 'intermediate',
+  topic: string,
+  count = 30
+): Promise<AIResult<StarterWord[]>> {
+  const res = await postJson<{ words: StarterWord[] }>('/api/ai/starter-deck', { sourceLanguage, level, topic, count }, 90000);
   if (!res.ok) return res;
   const words = (res.data.words || []).filter(w => w && w.term && w.meaning);
+  if (words.length === 0) return { ok: false, error: describeError(500) };
   return { ok: true, data: words };
 }
 

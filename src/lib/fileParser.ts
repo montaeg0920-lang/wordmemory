@@ -571,14 +571,21 @@ export function parseTextContent(
   };
 }
 
-/**
- * Reads one file out of a ZIP archive (DOCX files are ZIP archives).
- * Uses the browser's built-in DecompressionStream, so no extra library is needed.
- */
-async function readZipEntry(buffer: ArrayBuffer, entryName: string): Promise<Uint8Array | null> {
+/* ============================================================
+ * ZIP-based documents (Word .docx, PowerPoint .pptx, 한글 .hwpx)
+ * Read with the browser's built-in DecompressionStream — no extra library.
+ * ============================================================ */
+
+interface ZipEntry {
+  name: string;
+  method: number;
+  compSize: number;
+  localOffset: number;
+}
+
+function listZipEntries(buffer: ArrayBuffer): ZipEntry[] {
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
-  // Find "End of central directory" record (signature 0x06054b50) from the end.
   let eocd = -1;
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
     if (view.getUint32(i, true) === 0x06054b50) {
@@ -586,34 +593,41 @@ async function readZipEntry(buffer: ArrayBuffer, entryName: string): Promise<Uin
       break;
     }
   }
-  if (eocd < 0) return null;
-  const entries = view.getUint16(eocd + 10, true);
+  if (eocd < 0) return [];
+  const count = view.getUint16(eocd + 10, true);
   let ptr = view.getUint32(eocd + 16, true);
   const decoder = new TextDecoder();
-
-  for (let n = 0; n < entries; n++) {
-    if (view.getUint32(ptr, true) !== 0x02014b50) return null;
-    const method = view.getUint16(ptr + 10, true);
-    const compSize = view.getUint32(ptr + 20, true);
+  const entries: ZipEntry[] = [];
+  for (let n = 0; n < count; n++) {
+    if (view.getUint32(ptr, true) !== 0x02014b50) break;
     const nameLen = view.getUint16(ptr + 28, true);
     const extraLen = view.getUint16(ptr + 30, true);
     const commentLen = view.getUint16(ptr + 32, true);
-    const localOffset = view.getUint32(ptr + 42, true);
-    const name = decoder.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen));
-
-    if (name === entryName) {
-      const localNameLen = view.getUint16(localOffset + 26, true);
-      const localExtraLen = view.getUint16(localOffset + 28, true);
-      const start = localOffset + 30 + localNameLen + localExtraLen;
-      const data = bytes.subarray(start, start + compSize);
-      if (method === 0) return data;
-      if (method !== 8 || typeof DecompressionStream === 'undefined') return null;
-      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-      return new Uint8Array(await new Response(stream).arrayBuffer());
-    }
+    entries.push({
+      method: view.getUint16(ptr + 10, true),
+      compSize: view.getUint32(ptr + 20, true),
+      localOffset: view.getUint32(ptr + 42, true),
+      name: decoder.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen)),
+    });
     ptr += 46 + nameLen + extraLen + commentLen;
   }
-  return null;
+  return entries;
+}
+
+async function readZipText(buffer: ArrayBuffer, entry: ZipEntry): Promise<string | null> {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  const nameLen = view.getUint16(entry.localOffset + 26, true);
+  const extraLen = view.getUint16(entry.localOffset + 28, true);
+  const start = entry.localOffset + 30 + nameLen + extraLen;
+  const data = bytes.subarray(start, start + entry.compSize);
+  let out: Uint8Array;
+  if (entry.method === 0) out = data;
+  else if (entry.method === 8 && typeof DecompressionStream !== 'undefined') {
+    const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    out = new Uint8Array(await new Response(stream).arrayBuffer());
+  } else return null;
+  return new TextDecoder('utf-8').decode(out);
 }
 
 function decodeXmlEntities(text: string): string {
@@ -622,54 +636,115 @@ function decodeXmlEntities(text: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
     .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
     .replace(/&amp;/g, '&');
 }
 
-/**
- * Extracts plain text from a DOCX file. Table cells are joined with a tab so
- * "word | meaning" tables are parsed as two columns.
- */
+/** Turns office XML into lines; table rows become tab-separated lines. */
+function officeXmlToLines(xml: string, ns: 'w' | 'a' | 'hp'): string[] {
+  const lines: string[] = [];
+  const runRe = new RegExp(`<${ns}:tab\\s*/>|<${ns}:t(?:\\s[^>]*)?>[\\s\\S]*?</${ns}:t>`, 'g');
+  const paraRe = new RegExp(`<${ns}:p(?:\\s[^>]*)?>[\\s\\S]*?</${ns}:p>`, 'g');
+  const paragraphText = (p: string) =>
+    (p.match(runRe) || [])
+      .map(t => (/:tab/.test(t) && !/<\w+:t[\s>]/.test(t) ? '\t' : decodeXmlEntities(t.replace(/<[^>]+>/g, ''))))
+      .join('')
+      .trim();
+
+  const tbl = ns === 'w' ? 'w:tbl' : ns === 'a' ? 'a:tbl' : 'hp:tbl';
+  const tr = ns === 'w' ? 'w:tr' : ns === 'a' ? 'a:tr' : 'hp:tr';
+  const tc = ns === 'w' ? 'w:tc' : ns === 'a' ? 'a:tc' : 'hp:tc';
+  const tableRe = new RegExp(`<${tbl}(?:\\s[^>]*)?>[\\s\\S]*?</${tbl}>`, 'g');
+  const rowRe = new RegExp(`<${tr}(?:\\s[^>]*)?>[\\s\\S]*?</${tr}>`, 'g');
+  const cellRe = new RegExp(`<${tc}(?:\\s[^>]*)?>[\\s\\S]*?</${tc}>`, 'g');
+
+  const rest = xml.replace(tableRe, table => {
+    for (const row of table.match(rowRe) || []) {
+      const cells = (row.match(cellRe) || []).map(c => (c.match(paraRe) || []).map(paragraphText).join(' ').trim());
+      const line = cells.filter(Boolean).join('\t');
+      if (line) lines.push(line);
+    }
+    return '';
+  });
+  for (const p of rest.match(paraRe) || []) {
+    const line = paragraphText(p);
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+/** Plain text of a .docx / .pptx / .hwpx file (in reading order). */
+export async function extractOfficeText(buffer: ArrayBuffer, kind: 'docx' | 'pptx' | 'hwpx'): Promise<string> {
+  const entries = listZipEntries(buffer);
+  const order = (name: string) => Number((name.match(/(\d+)\.xml$/) || [])[1] || 0);
+  let targets: ZipEntry[] = [];
+  let ns: 'w' | 'a' | 'hp' = 'w';
+  if (kind === 'docx') targets = entries.filter(e => e.name === 'word/document.xml');
+  if (kind === 'pptx') {
+    targets = entries.filter(e => /^ppt\/slides\/slide\d+\.xml$/.test(e.name)).sort((a, b) => order(a.name) - order(b.name));
+    ns = 'a';
+  }
+  if (kind === 'hwpx') {
+    targets = entries.filter(e => /^Contents\/section\d+\.xml$/i.test(e.name)).sort((a, b) => order(a.name) - order(b.name));
+    ns = 'hp';
+  }
+  const lines: string[] = [];
+  for (const entry of targets) {
+    const xml = await readZipText(buffer, entry);
+    if (xml) lines.push(...officeXmlToLines(xml, ns));
+  }
+  return lines.join('\n');
+}
+
+/** Backwards-compatible DOCX parser. */
 export async function parseDocxFile(
   buffer: ArrayBuffer,
   fileName: string,
   existingItems: VocabularyItem[]
 ): Promise<ParsedImportResult> {
-  const empty: ParsedImportResult = { fileName, fileType: 'docx', totalParsed: 0, validCount: 0, duplicateCount: 0, rows: [] };
-  try {
-    const xmlBytes = await readZipEntry(buffer, 'word/document.xml');
-    if (!xmlBytes) return empty;
-    const xml = new TextDecoder('utf-8').decode(xmlBytes);
+  const text = await extractOfficeText(buffer, 'docx').catch(() => '');
+  return { ...parseTextContent(text, fileName, existingItems), fileType: 'docx' };
+}
 
-    const lines: string[] = [];
-    const paragraphText = (p: string) =>
-      (p.match(/<w:tab\/>|<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>/g) || [])
-        .map(t => (t === '<w:tab/>' ? '\t' : decodeXmlEntities(t.replace(/<[^>]+>/g, ''))))
-        .join('')
-        .trim();
+function stripHtml(html: string): string {
+  return decodeXmlEntities(
+    html
+      .replace(/<(script|style)[\s\S]*?<\/\1>/gi, '')
+      .replace(/<\/(p|div|li|tr|h\d)>|<br\s*\/?>/gi, '\n')
+      .replace(/<\/t[dh]>/gi, '\t')
+      .replace(/<[^>]+>/g, '')
+  );
+}
 
-    // Tables: one line per row, cells separated by tabs.
-    const withoutTables = xml.replace(/<w:tbl(?:\s[^>]*)?>[\s\S]*?<\/w:tbl>/g, table => {
-      for (const row of table.match(/<w:tr[\s>][\s\S]*?<\/w:tr>/g) || []) {
-        const cells = (row.match(/<w:tc(?:\s[^>]*)?>[\s\S]*?<\/w:tc>/g) || []).map(c =>
-          (c.match(/<w:p[\s>][\s\S]*?<\/w:p>/g) || []).map(paragraphText).join(' ').trim()
-        );
-        const line = cells.filter(Boolean).join('\t');
-        if (line) lines.push(line);
-      }
-      return '';
-    });
-    for (const p of withoutTables.match(/<w:p[\s>][\s\S]*?<\/w:p>/g) || []) {
-      const line = paragraphText(p);
-      if (line) lines.push(line);
-    }
+function stripRtf(rtf: string): string {
+  return rtf
+    .replace(/\\par[d]?/g, '\n')
+    .replace(/\\tab/g, '\t')
+    .replace(/\\'([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\u(-?\d+)\??/g, (_, d) => String.fromCharCode(Number(d) < 0 ? Number(d) + 65536 : Number(d)))
+    .replace(/\\[a-z]+-?\d* ?/gi, '')
+    .replace(/[{}]/g, '');
+}
 
-    const result = parseTextContent(lines.join('\n'), fileName, existingItems);
-    return { ...result, fileType: 'docx' };
-  } catch (e) {
-    console.error('DOCX parsing error:', e);
-    return empty;
-  }
+/* ============================================================
+ * "파일 넣기" — one entry point for (almost) any file
+ * ============================================================ */
+
+export type FileKind = 'image' | 'pdf' | 'sheet' | 'office' | 'text' | 'unsupported';
+
+const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'gif', 'bmp'];
+const SHEET_EXT = ['xlsx', 'xls', 'xlsm', 'ods', 'csv', 'tsv'];
+const TEXT_EXT = ['txt', 'md', 'markdown', 'text', 'html', 'htm', 'rtf', 'json', 'srt', 'vtt'];
+
+export function classifyFile(file: File): FileKind {
+  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  if (file.type.startsWith('image/') || IMAGE_EXT.includes(ext)) return 'image';
+  if (file.type === 'application/pdf' || ext === 'pdf') return 'pdf';
+  if (SHEET_EXT.includes(ext)) return 'sheet';
+  if (['docx', 'pptx', 'hwpx'].includes(ext)) return 'office';
+  if (TEXT_EXT.includes(ext) || file.type.startsWith('text/')) return 'text';
+  return 'unsupported';
 }
 
 export class NeedsAIExtractionError extends Error {
@@ -678,26 +753,44 @@ export class NeedsAIExtractionError extends Error {
   }
 }
 
-/**
- * Universal file entry point. PDFs and images are read by Gemini instead
- * (throws NeedsAIExtractionError so the caller can route them).
- */
-export async function processVocabularyFile(
-  file: File,
-  existingItems: VocabularyItem[]
-): Promise<ParsedImportResult> {
-  const extension = file.name.split('.').pop()?.toLowerCase() || '';
-
-  if (extension === 'pdf' || file.type === 'application/pdf' || file.type.startsWith('image/')) {
-    throw new NeedsAIExtractionError();
+export class UnsupportedFileError extends Error {
+  constructor(public fileName: string) {
+    super('UNSUPPORTED_FILE');
   }
-  if (extension === 'xlsx' || extension === 'xls' || extension === 'csv') {
-    const buffer = await file.arrayBuffer();
-    const workbook = XLSX.read(buffer, { type: 'array' });
+}
+
+/** Reads the readable text of a document-like file (for local parsing or AI). */
+export async function extractPlainText(file: File): Promise<string> {
+  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  const kind = classifyFile(file);
+  if (kind === 'sheet') {
+    const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    return workbook.SheetNames.map(n => XLSX.utils.sheet_to_csv(workbook.Sheets[n], { FS: '\t' })).join('\n');
+  }
+  if (kind === 'office') return extractOfficeText(await file.arrayBuffer(), ext as 'docx' | 'pptx' | 'hwpx');
+  if (kind === 'text') {
+    const raw = await file.text();
+    if (ext === 'html' || ext === 'htm') return stripHtml(raw);
+    if (ext === 'rtf') return stripRtf(raw);
+    if (ext === 'srt' || ext === 'vtt') return raw.replace(/^\d+\s*$|^[\d:.,\s\->]+$|WEBVTT/gm, '');
+    return raw;
+  }
+  return '';
+}
+
+/**
+ * Parses a file locally when possible (instant, no AI).
+ * Photos and PDFs throw NeedsAIExtractionError; old binary formats (hwp, doc, ppt)
+ * throw UnsupportedFileError.
+ */
+export async function processVocabularyFile(file: File, existingItems: VocabularyItem[]): Promise<ParsedImportResult> {
+  const kind = classifyFile(file);
+  if (kind === 'image' || kind === 'pdf') throw new NeedsAIExtractionError();
+  if (kind === 'unsupported') throw new UnsupportedFileError(file.name);
+  if (kind === 'sheet') {
+    const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
     return parseSpreadsheetData(workbook, file.name, existingItems);
   }
-  if (extension === 'docx') {
-    return parseDocxFile(await file.arrayBuffer(), file.name, existingItems);
-  }
-  return parseTextContent(await file.text(), file.name, existingItems);
+  const text = await extractPlainText(file);
+  return { ...parseTextContent(text, file.name, existingItems), fileType: kind };
 }
