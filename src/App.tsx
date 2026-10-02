@@ -11,6 +11,7 @@ import { UserProfileModal } from './components/UserProfileModal';
 import { WelcomeOnboardingModal } from './components/WelcomeOnboardingModal';
 import { UsageGuide } from './components/UsageGuide';
 import { getTrialPasteText } from './data/trialWords';
+import { ensurePack } from './lib/langPack';
 import { Notice } from './components/ui';
 import {
   STORAGE_ERROR_EVENT,
@@ -86,6 +87,11 @@ export default function App() {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(!hasCompletedOnboarding());
   const [showGuide, setShowGuide] = useState(false);
+
+  // Download (or update) the offline dictionary of the language being studied, quietly in the background.
+  useEffect(() => {
+    if (!showOnboarding) ensurePack(activeProfile.targetLanguage);
+  }, [activeProfile.targetLanguage, showOnboarding]);
   const [trialOffer, setTrialOffer] = useState(isTrialOfferActive);
   /** Sample words pre-filled into the paste box when the learner starts the trial. */
   const [trialPaste, setTrialPaste] = useState<string | null>(null);

@@ -1,9 +1,10 @@
-import React, { useRef, useState } from 'react';
-import { BookOpen, ChevronRight, Download, Upload } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { BookOpen, Check, ChevronRight, Download, Loader2, Upload } from 'lucide-react';
 import { UserProfile, UserSettings } from '../types/database';
 import { clearAllWords, exportUserDataAsJson, importUserDataFromJson } from '../lib/storage';
 import { getLanguageMeta } from '../lib/languageHelper';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { PackStatus, downloadPack, formatPackSize, getPackStatus } from '../lib/langPack';
 import { Button, Card, Notice, ScreenHeader, SectionLabel, Segmented, Toggle, inputClass } from './ui';
 
 interface SettingsScreenProps {
@@ -111,6 +112,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         />
       </Card>
 
+      <SectionLabel>오프라인 사전</SectionLabel>
+      <LangPackCard lang={activeProfile.targetLanguage} langName={lang.name} />
+
       <SectionLabel>도움말</SectionLabel>
       <Card className="mb-8">
         <RowButton onClick={onOpenGuide} icon={<BookOpen className="w-5 h-5" />} label="이용 가이드 다시 보기" />
@@ -215,6 +219,83 @@ const DailyNewWordsInput: React.FC<{ value: number; onChange: (v: number) => voi
         0개로 두면 새 단어 없이 복습만 합니다. 100개보다 더 하고 싶으면 숫자를 직접 적어 주세요.
       </p>
     </div>
+  );
+};
+
+/** Status of the downloaded dictionary for the language being studied. */
+const LangPackCard: React.FC<{ lang: string; langName: string }> = ({ lang, langName }) => {
+  const [status, setStatus] = useState<PackStatus | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setStatus(null);
+    getPackStatus(lang).then(s => alive && setStatus(s));
+    return () => {
+      alive = false;
+    };
+  }, [lang]);
+
+  const download = async () => {
+    setError(null);
+    setProgress(0);
+    try {
+      await downloadPack(lang, setProgress);
+      setStatus(await getPackStatus(lang));
+    } catch (e) {
+      setError(e instanceof Error && /손상/.test(e.message) ? e.message : '사전을 받지 못했습니다. 인터넷 연결을 확인하고 다시 시도해 주세요.');
+    } finally {
+      setProgress(null);
+    }
+  };
+
+  const info = status && status.state !== 'none' ? status.info : null;
+  return (
+    <Card className="px-4 py-4 mb-8">
+      {!status ? (
+        <p className="text-[14px] text-muted">확인하는 중…</p>
+      ) : status.state === 'none' ? (
+        <p className="text-[14px] text-ink-2 leading-relaxed">
+          {langName} 사전은 아직 준비 중입니다. 사전 채우기는 인터넷 사전으로 찾습니다.
+        </p>
+      ) : (
+        <>
+          <div className="flex items-center gap-3">
+            <div className="flex-1 min-w-0">
+              <p className="text-[15px]">{langName} 사전</p>
+              <p className="text-[13px] text-muted mt-0.5">
+                {status.state === 'ready'
+                  ? `받음 · ${status.entries.toLocaleString()}단어 · 인터넷 없이 사용`
+                  : status.state === 'outdated'
+                    ? `새 버전이 있어요 · ${formatPackSize(status.info.bytes)}`
+                    : `${status.info.entries.toLocaleString()}단어 · ${formatPackSize(status.info.bytes)}`}
+              </p>
+            </div>
+            {progress !== null ? (
+              <span className="inline-flex items-center gap-1.5 text-[14px] text-muted tabular-nums">
+                <Loader2 className="w-4 h-4 animate-spin" /> {Math.round(progress * 100)}%
+              </span>
+            ) : status.state === 'ready' ? (
+              <span className="inline-flex items-center gap-1 text-[14px] text-good">
+                <Check className="w-4 h-4" /> 준비됨
+              </span>
+            ) : (
+              <Button onClick={download}>{status.state === 'outdated' ? '업데이트' : '받기'}</Button>
+            )}
+          </div>
+          {error && (
+            <div className="mt-3">
+              <Notice tone="bad">{error}</Notice>
+            </div>
+          )}
+          <p className="text-[12px] text-muted mt-3 leading-relaxed">
+            배우는 언어의 사전만 이 기기에 받아 두고, 단어를 넣을 때 뜻·발음·예문을 바로 채웁니다. 사전에 없는 단어는 인터넷 사전에서 찾습니다.
+            {info?.sources?.length ? ` 출처: ${info.sources.join(', ')}.` : ''}
+          </p>
+        </>
+      )}
+    </Card>
   );
 };
 
