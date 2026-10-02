@@ -1,14 +1,15 @@
 # VocaCurve 2.0 — 망각곡선 단어장
 
-잊어버리기 직전의 단어만 골라 하루 몇 분 복습하는 단어장입니다. (React + Vite, Express 서버에서 Gemini 호출)
+잊어버리기 직전의 단어만 골라 하루 몇 분 복습하는 단어장입니다. (React + Vite + Express. AI 키 없이 동작)
 
 View your app in AI Studio: https://ai.studio/apps/c712fba2-50d8-41e0-9050-779a932b13f9
 
 ## 실행
 
 1. `npm install`
-2. `.env.local`에 `GEMINI_API_KEY` 설정 (AI Studio에서는 Secrets 패널이 자동으로 넣어 줍니다)
-3. `npm run dev`
+2. `npm run dev`
+
+API 키가 필요 없습니다. 사진·PDF는 사용자의 기기에서 읽고, 뜻·발음·예문은 무료 공개 사전에서 찾습니다.
 
 ## 2.0 변경 요약
 
@@ -31,10 +32,10 @@ View your app in AI Studio: https://ai.studio/apps/c712fba2-50d8-41e0-9050-779a9
 - "약한 단어 연습"은 복습 일정에 영향 없음
 
 **단어 추가**
-- 한 단어: 단어만 입력하고 Enter → AI가 뜻·발음·예문 채움 → 확인 후 저장
+- 한 단어: 단어만 입력하고 Enter → 사전에서 뜻·발음·예문 채움 → 확인 후 저장
 - 붙여넣기 / 파일(XLSX·CSV·TXT·DOCX·PDF·이미지), 저장 전 미리보기·수정
-- DOCX를 실제로 압축 해제해서 읽도록 수정, PDF·사진은 Gemini가 읽음
-- AI 실패 시 가짜 데이터를 저장하지 않고 안내만 표시
+- DOCX를 실제로 압축 해제해서 읽도록 수정
+- 사전 검색 실패 시 가짜 데이터를 저장하지 않고 안내만 표시
 
 **서버**
 - `/api/ai/*` 요청 횟수 제한(IP당 10분 300회)과 입력 길이 제한
@@ -44,3 +45,14 @@ View your app in AI Studio: https://ai.studio/apps/c712fba2-50d8-41e0-9050-779a9
 - "조용한 단어 카드" 컨셉: 종이색 배경, 먹색 글씨, 강조색 1개, 그림자·그라데이션·이모지 제거
 - 다크 모드(기기 설정 따름 / 직접 선택), 최소 글자 크기 12px 이상, 단어는 세리프체
 - 존재하지 않던 기능(알림 토글, 문장 모드 설정) 제거
+
+## AI 없이 단어 읽기·채우기 (Gemini 제거)
+
+- **사진**: 기기 안에서 [Tesseract](https://github.com/naptha/tesseract.js) OCR로 글자를 읽음 (배우는 언어 + 한국어). 인식 엔진과 언어 자료는 앱 서버가 npm 패키지에서 직접 제공 (`/ocr/*`), 처음 한 번 받은 뒤 브라우저에 저장됨
+- **PDF**: [PDF.js](https://mozilla.github.io/pdf.js/)로 글자를 읽고, 스캔된 쪽은 OCR로 읽음
+- **문서·표·텍스트**: 기존처럼 기기에서 바로 읽음. 단어만 있는 목록(뜻 없음)도 단어를 찾아 두고, 저장할 때 사전에서 뜻을 채움
+- **뜻·발음·예문**: 앱 서버의 `/api/dict/lookup`이 무료 공개 서비스에서 찾음
+  - 한국어 뜻: [MyMemory](https://mymemory.translated.net/) 번역 API (키 없음, 하루 사용량 제한 있음)
+  - 영어 발음·품사·예문: [Free Dictionary API](https://dictionaryapi.dev/)
+  - 영어 외 언어는 뜻만 채움
+
