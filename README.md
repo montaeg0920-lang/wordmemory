@@ -51,8 +51,9 @@ API 키가 필요 없습니다. 사진·PDF는 사용자의 기기에서 읽고,
 - **사진**: 기기 안에서 [Tesseract](https://github.com/naptha/tesseract.js) OCR로 글자를 읽음 (배우는 언어 + 한국어). 인식 엔진과 언어 자료는 앱 서버가 npm 패키지에서 직접 제공 (`/ocr/*`), 처음 한 번 받은 뒤 브라우저에 저장됨
 - **PDF**: [PDF.js](https://mozilla.github.io/pdf.js/)로 글자를 읽고, 스캔된 쪽은 OCR로 읽음
 - **문서·표·텍스트**: 기존처럼 기기에서 바로 읽음. 단어만 있는 목록(뜻 없음)도 단어를 찾아 두고, 저장할 때 사전에서 뜻을 채움
-- **뜻·발음·예문**: 앱 서버의 `/api/dict/lookup`이 무료 공개 서비스에서 찾음
-  - 한국어 뜻: [MyMemory](https://mymemory.translated.net/) 번역 API (키 없음, 하루 사용량 제한 있음)
-  - 영어 발음·품사·예문: [Free Dictionary API](https://dictionaryapi.dev/)
-  - 영어 외 언어는 뜻만 채움
+- **뜻·발음·예문**
+  1. **언어 팩(오프라인 사전)**: 배우는 언어의 사전만 받아 브라우저(IndexedDB)에 저장해 두고 바로 찾음. 팩은 별도 공개 저장소 [vocacurve-langpack](https://github.com/montaeg0920-lang/vocacurve-langpack)에 있고 jsDelivr(예비: raw.githubusercontent.com)로 받음. 버전이 바뀔 때만 다시 받음. 현재 영어(2만 단어, 약 1.3MB)
+  2. 팩에 없는 단어: 브라우저에서 무료 공개 서비스를 직접 호출
+     - 한국어 뜻: [MyMemory](https://mymemory.translated.net/) 번역 API (키 없음, 사용자별 하루 사용량 제한)
+     - 영어 발음·품사·예문: [Free Dictionary API](https://dictionaryapi.dev/)
 
