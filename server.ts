@@ -1,8 +1,8 @@
 import express from 'express';
 import dotenv from 'dotenv';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
 
@@ -13,217 +13,140 @@ const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.set('trust proxy', true);
-app.use('/api/ai/extract-vocab', express.json({ limit: '25mb' }));
-app.use(express.json({ limit: '100kb' }));
 
-/**
- * Simple in-memory rate limit for the AI endpoints so that nobody can burn the
- * Gemini quota by calling /api/ai/* in a loop. (Per server instance, per IP.)
+/* ============================ OCR assets ============================
+ * Photos and scanned PDFs are read on the learner's own device with Tesseract
+ * (open source). The engine and the language data are served from installed
+ * npm packages, so nothing has to be downloaded from a third-party CDN.
+ */
+const NODE_MODULES = path.join(__dirname, 'node_modules');
+const OCR_CACHE = { maxAge: '30d', immutable: true };
+app.get('/ocr/worker.min.js', (_req, res) =>
+  res.sendFile(path.join(NODE_MODULES, 'tesseract.js', 'dist', 'worker.min.js'), OCR_CACHE)
+);
+app.use('/ocr/core', express.static(path.join(NODE_MODULES, 'tesseract.js-core'), OCR_CACHE));
+const OCR_LANGS = new Set(['eng', 'kor', 'jpn', 'chi_sim', 'spa', 'fra', 'deu', 'heb', 'ell', 'grc']);
+app.get('/ocr/lang/:file', (req, res) => {
+  const m = /^([a-z_]+)\.traineddata\.gz$/.exec(req.params.file);
+  if (!m || !OCR_LANGS.has(m[1])) return res.status(404).end();
+  const file = path.join(NODE_MODULES, '@tesseract.js-data', m[1], '4.0.0_best_int', `${m[1]}.traineddata.gz`);
+  if (!fs.existsSync(file)) return res.status(404).end();
+  res.sendFile(file, OCR_CACHE);
+});
+
+/* ========================= Dictionary lookup =========================
+ * Fills in a word's Korean meaning, pronunciation, part of speech and an
+ * example without any AI key:
+ *  - Korean meanings: MyMemory translation API (free, no key)
+ *  - English pronunciation / part of speech / example: Free Dictionary API (dictionaryapi.dev)
+ * Results are cached in memory, and requests are rate-limited per IP.
  */
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 const RATE_MAX_REQUESTS = 300;
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
-app.use('/api/ai', (req, res, next) => {
+app.use('/api/dict', (req, res, next) => {
   const key = req.ip || 'unknown';
   const now = Date.now();
   const bucket = rateBuckets.get(key);
   if (!bucket || bucket.resetAt < now) {
     rateBuckets.set(key, { count: 1, resetAt: now + RATE_WINDOW_MS });
-    if (rateBuckets.size > 5000) {
-      for (const [k, b] of rateBuckets) if (b.resetAt < now) rateBuckets.delete(k);
-    }
+    if (rateBuckets.size > 5000) for (const [k, b] of rateBuckets) if (b.resetAt < now) rateBuckets.delete(k);
     return next();
   }
-  bucket.count += 1;
-  if (bucket.count > RATE_MAX_REQUESTS) {
-    res.setHeader('Retry-After', Math.ceil((bucket.resetAt - now) / 1000).toString());
-    return res.status(429).json({ error: 'RATE_LIMITED', message: '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.' });
-  }
+  if (++bucket.count > RATE_MAX_REQUESTS) return res.status(429).json({ error: 'RATE_LIMITED' });
   next();
 });
 
-const LANGUAGE_NAMES: Record<string, string> = {
-  en: 'English', ja: 'Japanese', es: 'Spanish', de: 'German', fr: 'French', zh: 'Chinese',
-  he: 'Biblical Hebrew', el: 'Koine (Biblical) Greek', ko: 'Korean', other: 'the source language',
+/** App language code -> MyMemory language code. */
+const TRANSLATE_LANG: Record<string, string> = {
+  en: 'en', es: 'es', ja: 'ja', zh: 'zh-CN', fr: 'fr', de: 'de', he: 'he', el: 'el',
 };
+const POS_KO: Record<string, string> = {
+  noun: '명사', verb: '동사', adjective: '형용사', adverb: '부사', pronoun: '대명사',
+  preposition: '전치사', conjunction: '접속사', interjection: '감탄사', determiner: '한정사', article: '관사',
+};
+const HANGUL = /[\uac00-\ud7a3]/;
 
-/**
- * Calls Gemini for a JSON answer. Word extraction does not need long "thinking",
- * so we ask for a low thinking level (much faster). If the model rejects that
- * option, we retry once without it.
- */
-async function generateJson(contents: any, responseSchema: any): Promise<any> {
-  if (!ai) throw new Error('AI_NOT_CONFIGURED');
-  const base = { responseMimeType: 'application/json', responseSchema };
-  let response;
-  try {
-    response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents,
-      config: { ...base, thinkingConfig: { thinkingLevel: 'low' } } as any,
-    });
-  } catch (err: any) {
-    if (!/thinking/i.test(String(err?.message || ''))) throw err;
-    response = await ai.models.generateContent({ model: 'gemini-3.8-flash', contents, config: base });
-  }
-  return JSON.parse(response.text || '{}');
+async function fetchJson(url: string, timeoutMs = 8000): Promise<any> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { Accept: 'application/json' } });
+  if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
+  return res.json();
 }
 
-const WORD_LIST_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    words: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          term: { type: Type.STRING },
-          meaning: { type: Type.STRING },
-          partOfSpeech: { type: Type.STRING },
-          pronunciation: { type: Type.STRING },
-        },
-        required: ['term', 'meaning'],
-      },
-    },
-  },
-  required: ['words'],
-};
+/** Korean translations of a word or sentence, best first (empty when the service has none). */
+async function translateToKorean(text: string, lang: string): Promise<string[]> {
+  const src = TRANSLATE_LANG[lang];
+  if (!src) return [];
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${encodeURIComponent(`${src}|ko`)}`;
+  const data = await fetchJson(url);
+  const out: string[] = [];
+  const add = (t: unknown) => {
+    const v = String(t || '').trim().replace(/[.。]$/, '');
+    if (v && HANGUL.test(v) && v.length <= 60 && !/MYMEMORY|QUERY LENGTH/i.test(v) && !out.includes(v)) out.push(v);
+  };
+  add(data?.responseData?.translatedText);
+  const matches = Array.isArray(data?.matches) ? data.matches : [];
+  matches
+    .filter((m: any) => String(m?.segment || '').trim().toLowerCase() === text.trim().toLowerCase())
+    .sort((a: any, b: any) => Number(b?.quality || 0) - Number(a?.quality || 0))
+    .forEach((m: any) => add(m?.translation));
+  return out.slice(0, 4);
+}
 
-// Initialize GoogleGenAI client strictly according to skill guidelines
-const apiKey = process.env.GEMINI_API_KEY;
-const ai = apiKey
-  ? new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    })
-  : null;
+interface EnglishEntry { pronunciation?: string; partOfSpeech?: string; example?: string }
 
-/**
- * AI Vocabulary Analysis Endpoint
- * Generates lemma, partOfSpeech, pronunciation, alternativeMeanings,
- * difficulty (1-5), commonCollocations, example sentence with translation,
- * and high quality distractors for multiple choice.
- */
-app.post('/api/ai/analyze-word', async (req, res) => {
-  try {
-    const { term, userMeaning, sourceLanguage = 'en', targetLanguage = 'ko' } = req.body;
+async function lookupEnglish(term: string): Promise<EnglishEntry> {
+  const data = await fetchJson(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term.toLowerCase())}`);
+  const entries: any[] = Array.isArray(data) ? data : [];
+  const pronunciation =
+    entries.map(e => e?.phonetic).find(Boolean) ||
+    entries.flatMap(e => (Array.isArray(e?.phonetics) ? e.phonetics : [])).map((p: any) => p?.text).find(Boolean);
+  const meanings = entries.flatMap(e => (Array.isArray(e?.meanings) ? e.meanings : []));
+  const pos = meanings.map((m: any) => POS_KO[String(m?.partOfSpeech || '').toLowerCase()]).find(Boolean);
+  const examples: string[] = meanings
+    .flatMap((m: any) => (Array.isArray(m?.definitions) ? m.definitions : []))
+    .map((d: any) => String(d?.example || '').trim())
+    .filter((x: string) => x.length > 0 && x.length <= 160);
+  const lower = term.toLowerCase();
+  const example = examples.find(x => x.toLowerCase().includes(lower)) || examples[0];
+  return { pronunciation: pronunciation || undefined, partOfSpeech: pos, example };
+}
 
-    if (!term || typeof term !== 'string' || term.length > 120) {
-      return res.status(400).json({ error: 'INVALID_TERM' });
-    }
-    if (typeof userMeaning === 'string' && userMeaning.length > 300) {
-      return res.status(400).json({ error: 'INVALID_MEANING' });
-    }
+const lookupCache = new Map<string, { at: number; value: unknown }>();
+const CACHE_MS = 24 * 60 * 60 * 1000;
 
-    if (!ai) {
-      return res.status(503).json({ error: 'AI_NOT_CONFIGURED' });
-    }
+/** GET /api/dict/lookup?term=derive&lang=en */
+app.get('/api/dict/lookup', async (req, res) => {
+  const term = String(req.query.term || '').trim();
+  const lang = String(req.query.lang || 'en');
+  if (!term || term.length > 60) return res.status(400).json({ error: 'INVALID_TERM' });
 
-    const langName = LANGUAGE_NAMES[sourceLanguage] || sourceLanguage;
-    const prompt = `Analyze the vocabulary word "${term}" (source language: ${langName}, target language: ${targetLanguage === 'ko' ? 'Korean' : targetLanguage}).
-User provided primary meaning: "${userMeaning || ''}".
-Generate educational data for spaced repetition learning:
-1. lemma (base form / lexicon root)
-2. partOfSpeech (in Korean, e.g. 명사, 동사, 형용사, 부사, 전치사)
-3. pronunciation (phonetic reading and romanization: for Hebrew provide Korean/Latin transliteration like "샬롬 [shalom]"; for Greek/헬라어 provide transliteration like "아가페 [agape]"; for Japanese provide Hiragana+Romaji like "たべる (taberu)"; for English/Spanish/German provide phonetic IPA like /dɪˈraɪv/)
-4. alternativeMeanings: up to 3 distinct valid Korean meanings other than the user's primary meaning.
-5. difficulty: 1 (elementary) to 5 (advanced)
-6. collocations: 2-3 natural collocations or biblical/classical usages if ancient language
-7. exampleSentence: an authentic, clear sentence demonstrating the word in its source language (${sourceLanguage}), plus natural Korean translation. (en field should contain the source language sentence, ko field should contain the Korean translation)
-8. distractors: 4 plausible Korean definitions of OTHER similar-level words that are definitively NOT valid definitions of "${term}" or "${userMeaning}". Avoid ambiguous synonyms.`;
+  const key = `${lang}:${term.toLowerCase()}`;
+  const cached = lookupCache.get(key);
+  if (cached && Date.now() - cached.at < CACHE_MS) return res.json(cached.value);
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            lemma: { type: Type.STRING },
-            partOfSpeech: { type: Type.STRING },
-            pronunciation: { type: Type.STRING },
-            alternativeMeanings: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            difficulty: { type: Type.INTEGER },
-            collocations: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            exampleSentence: {
-              type: Type.OBJECT,
-              properties: {
-                en: { type: Type.STRING },
-                ko: { type: Type.STRING },
-              },
-              required: ['en', 'ko'],
-            },
-            distractors: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-          },
-          required: ['lemma', 'partOfSpeech', 'alternativeMeanings', 'difficulty', 'distractors'],
-        },
-      },
-    });
-
-    const parsed = JSON.parse(response.text || '{}');
-    return res.json({ success: true, aiData: parsed });
-  } catch (err: any) {
-    console.error('Gemini analyze error:', err);
-    return res.status(500).json({ error: 'AI_FAILED' });
+  const [meanings, english] = await Promise.allSettled([
+    translateToKorean(term, lang),
+    lang === 'en' && /^[a-z][a-z' -]*$/i.test(term) ? lookupEnglish(term) : Promise.resolve({} as EnglishEntry),
+  ]);
+  const entry: EnglishEntry = english.status === 'fulfilled' ? english.value : {};
+  let exampleKo = '';
+  if (entry.example) {
+    exampleKo = (await translateToKorean(entry.example, lang).catch(() => [] as string[]))[0] || '';
   }
-});
-
-/**
- * Extract a vocabulary list from a photo, a PDF, or plain text (documents, slides, notes).
- * Body: { mimeType, data: base64 } or { text }, plus sourceLanguage.
- */
-const EXTRACT_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf']);
-app.post('/api/ai/extract-vocab', async (req, res) => {
-  try {
-    const { mimeType, data, text, sourceLanguage = 'en' } = req.body || {};
-    const isText = typeof text === 'string' && text.trim().length > 0;
-    if (!isText && (!EXTRACT_MIME.has(mimeType) || typeof data !== 'string' || data.length < 10)) {
-      return res.status(400).json({ error: 'INVALID_FILE' });
-    }
-    if (isText && text.length > 80000) {
-      return res.status(413).json({ error: 'TOO_LARGE' });
-    }
-    if (!ai) {
-      return res.status(503).json({ error: 'AI_NOT_CONFIGURED' });
-    }
-
-    const langName = LANGUAGE_NAMES[sourceLanguage] || 'the foreign language';
-    const source = isText ? 'text' : mimeType === 'application/pdf' ? 'document' : 'photo';
-    const prompt = `You extract vocabulary for a Korean learner of ${langName}.
-The ${source} below is a word list, textbook page, handout or notes. Return every vocabulary entry as { term, meaning }.
-Rules:
-- term: the ${langName} word or phrase exactly as written (keep accents, Hebrew vowel points, Greek accents). Only ${langName} entries.
-- meaning: the Korean meaning as written. If none is written, give a short natural Korean meaning.
-- partOfSpeech (Korean, e.g. 명사/동사/형용사/부사) and pronunciation: only if written or obvious; otherwise omit.
-- Remove numbering, bullets, page numbers, headings, instructions and example sentences.
-- Keep the original order. Do not invent entries. Maximum 300 entries.
-- If the photo is rotated, blurry or partly cut off, still read what is legible.`;
-
-    const parts: any[] = isText ? [{ text: prompt + '\n\n--- TEXT ---\n' + text }] : [{ inlineData: { mimeType, data } }, { text: prompt }];
-    const parsed = await generateJson([{ role: 'user', parts }], WORD_LIST_SCHEMA);
-    const words = Array.isArray(parsed.words) ? parsed.words.slice(0, 300) : [];
-    return res.json({ success: true, words });
-  } catch (err: any) {
-    console.error('Gemini extract error:', err);
-    const status = Number(err?.status || err?.code);
-    if (status === 429) return res.status(429).json({ error: 'RATE_LIMITED' });
-    if (status === 413) return res.status(413).json({ error: 'TOO_LARGE' });
-    return res.status(500).json({ error: 'AI_FAILED' });
+  const value = {
+    meanings: meanings.status === 'fulfilled' ? meanings.value : [],
+    partOfSpeech: entry.partOfSpeech,
+    pronunciation: entry.pronunciation,
+    example: entry.example ? { text: entry.example, ko: exampleKo } : null,
+  };
+  if (meanings.status === 'rejected' && english.status === 'rejected') {
+    console.error('Dictionary lookup failed:', meanings.reason, english.reason);
+    return res.status(502).json({ error: 'LOOKUP_FAILED' });
   }
+  if (lookupCache.size > 20000) lookupCache.clear();
+  lookupCache.set(key, { at: Date.now(), value });
+  return res.json(value);
 });
 
 // Setup Vite middleware in dev or static files in production

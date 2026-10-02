@@ -1,15 +1,14 @@
 /**
- * Photo preparation for AI text recognition.
+ * Photo preparation for on-device text recognition (OCR).
  *
- * Phone photos are often 3–15MB (12–48MP). Sending them as-is is slow, can hit
- * upload limits and can crash the browser while converting. We shrink them to
- * at most 1600px (plenty for reading printed text) and re-encode as JPEG,
- * which also fixes rotation (EXIF orientation is applied when drawing).
+ * Phone photos are often 3–15MB (12–48MP). Recognising them as-is is slow and
+ * can crash the browser. We shrink them to at most 2400px (plenty for printed
+ * text) and re-encode as JPEG, which also fixes rotation (EXIF orientation is
+ * applied when drawing).
  */
 
-export const MAX_SIDE = 1600;
-const JPEG_QUALITY = 0.82;
-const RAW_FALLBACK_LIMIT = 7 * 1024 * 1024;
+export const MAX_SIDE = 2400;
+const JPEG_QUALITY = 0.92;
 
 export class ImagePrepError extends Error {
   constructor(public code: 'HEIC_UNSUPPORTED' | 'TOO_LARGE' | 'DECODE_FAILED') {
@@ -53,13 +52,12 @@ function isHeic(file: File) {
   return /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name);
 }
 
-/** Returns a small JPEG ready for upload (or the original file if it cannot be decoded but is small enough). */
-export async function prepareImageForUpload(file: File): Promise<{ blob: Blob; mimeType: string }> {
+/** Returns a decoded, upright, size-limited JPEG ready for text recognition. */
+export async function prepareImageForOcr(file: File): Promise<Blob> {
   // 1) <img> decode — applies EXIF rotation, works for JPEG/PNG/WebP/GIF everywhere and HEIC on Safari.
   try {
     const img = await loadImage(file);
-    const blob = await canvasToJpeg(img, img.naturalWidth, img.naturalHeight);
-    return { blob, mimeType: 'image/jpeg' };
+    return await canvasToJpeg(img, img.naturalWidth, img.naturalHeight);
   } catch {
     // continue
   }
@@ -68,13 +66,9 @@ export async function prepareImageForUpload(file: File): Promise<{ blob: Blob; m
     const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' } as ImageBitmapOptions);
     const blob = await canvasToJpeg(bitmap, bitmap.width, bitmap.height);
     bitmap.close?.();
-    return { blob, mimeType: 'image/jpeg' };
+    return blob;
   } catch {
     // continue
   }
-  // 3) Could not decode in this browser: Gemini can still read HEIC/other images directly if small enough.
-  if (file.size <= RAW_FALLBACK_LIMIT) {
-    return { blob: file, mimeType: file.type || (isHeic(file) ? 'image/heic' : 'image/jpeg') };
-  }
-  throw new ImagePrepError(isHeic(file) ? 'HEIC_UNSUPPORTED' : 'TOO_LARGE');
+  throw new ImagePrepError(isHeic(file) ? 'HEIC_UNSUPPORTED' : 'DECODE_FAILED');
 }

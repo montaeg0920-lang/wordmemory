@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { Loader2, Sparkles, Trash2, Volume2 } from 'lucide-react';
+import { BookOpen, Loader2, Trash2, Volume2 } from 'lucide-react';
 import { MemoryState, VocabularyFolder, VocabularyItem } from '../types/database';
 import { DESIRED_RETENTION, MS_PER_DAY, formatDueAt, getMemoryView, predictRecall } from '../lib/memoryEngine';
 import { speakEnglishWord } from '../lib/sound';
-import { analyzeWordWithAI } from '../lib/aiClient';
+import { lookupWord } from '../lib/wordLookup';
 import { Button, Field, Notice, Select, Sheet, StatusTag, TermText, inputClass } from './ui';
 
 interface WordDetailModalProps {
@@ -59,7 +59,7 @@ export const WordDetailModal: React.FC<WordDetailModalProps> = ({ item, memorySt
   const enrich = async () => {
     setAiBusy(true);
     setAiError(null);
-    const res = await analyzeWordWithAI(item.term, item.userMeaning, item.sourceLanguage);
+    const res = await lookupWord(item.term, item.sourceLanguage);
     setAiBusy(false);
     if (!res.ok) {
       setAiError(res.error);
@@ -70,13 +70,13 @@ export const WordDetailModal: React.FC<WordDetailModalProps> = ({ item, memorySt
       ...item,
       partOfSpeech: item.partOfSpeech || d.partOfSpeech || undefined,
       pronunciation: item.pronunciation || d.pronunciation || undefined,
-      alternativeMeanings: item.alternativeMeanings?.length ? item.alternativeMeanings : d.alternativeMeanings,
-      collocations: item.collocations?.length ? item.collocations : d.collocations,
-      distractors: d.distractors,
+      alternativeMeanings: item.alternativeMeanings?.length
+        ? item.alternativeMeanings
+        : d.meanings.filter(m => m !== item.userMeaning).slice(0, 3),
       exampleSentences:
-        item.exampleSentences?.length || !d.exampleSentence
+        item.exampleSentences?.length || !d.example
           ? item.exampleSentences
-          : [{ id: `ex_ai_${Date.now()}`, source: 'ai', en: d.exampleSentence.en, ko: d.exampleSentence.ko, clozeBlank: item.term }],
+          : [{ id: `ex_dict_${Date.now()}`, source: 'ai', en: d.example.text, ko: d.example.ko, clozeBlank: item.term }],
     });
   };
 
@@ -161,8 +161,8 @@ export const WordDetailModal: React.FC<WordDetailModalProps> = ({ item, memorySt
               disabled={aiBusy}
               className="mt-4 inline-flex items-center gap-1.5 text-sm text-accent font-medium disabled:opacity-50"
             >
-              {aiBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              AI로 발음·예문 채우기
+              {aiBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <BookOpen className="w-4 h-4" />}
+              사전에서 발음·예문 채우기
             </button>
           )}
           {aiError && (

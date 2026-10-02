@@ -1,8 +1,11 @@
 import React, { useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { Check, ClipboardList, FileUp, Loader2, PenLine, Sparkles, Trash2 } from 'lucide-react';
+import { BookOpen, Check, ClipboardList, FileUp, Loader2, PenLine, Trash2 } from 'lucide-react';
 import { LanguageCode, UserSettings, VocabularyCollection, VocabularyFolder, VocabularyItem } from '../types/database';
-import { ExtractedWord, analyzeWordWithAI, extractVocabularyFromFile, extractVocabularyFromText, mapWithConcurrency } from '../lib/aiClient';
+import { ExtractedWord, lookupWord, mapWithConcurrency } from '../lib/wordLookup';
+import { ImagePrepError, prepareImageForOcr } from '../lib/imageTools';
+import { recognizeText } from '../lib/ocr';
+import { extractPdfText } from '../lib/pdfText';
 import { ParsedImportResult, classifyFile, extractPlainText, parseSpreadsheetData, parseTextContent } from '../lib/fileParser';
 import { detectLanguage, getLanguageMeta } from '../lib/languageHelper';
 import { Button, Card, Field, Notice, ScreenHeader, Segmented, Select, Sheet, TermText, inputClass } from './ui';
@@ -36,7 +39,7 @@ interface DraftRow {
   warning?: string;
 }
 
-const MAX_AI_ENRICH = 100;
+const MAX_LOOKUPS = 100;
 
 export const AddWordsScreen: React.FC<AddWordsScreenProps> = ({
   collections,
@@ -245,7 +248,7 @@ const SingleWordForm: React.FC<{
     if (!row.term.trim()) return;
     setBusy(true);
     setError(null);
-    const res = await analyzeWordWithAI(row.term.trim(), row.meaning.trim(), wordLang);
+    const res = await lookupWord(row.term.trim(), wordLang);
     setBusy(false);
     if (!res.ok) {
       setError(res.error);
@@ -253,17 +256,15 @@ const SingleWordForm: React.FC<{
     }
     const d = res.data;
     setRow(r => {
-      const meaning = r.meaning.trim() || d.alternativeMeanings[0] || '';
+      const meaning = r.meaning.trim() || d.meanings[0] || '';
       return {
         ...r,
         meaning,
-        alternativeMeanings: d.alternativeMeanings.filter(m => m !== meaning).slice(0, 3),
+        alternativeMeanings: d.meanings.filter(m => m !== meaning).slice(0, 3),
         partOfSpeech: r.partOfSpeech || d.partOfSpeech || undefined,
         pronunciation: r.pronunciation || d.pronunciation || undefined,
-        exampleEn: r.exampleEn || d.exampleSentence?.en || undefined,
-        exampleKo: r.exampleKo || d.exampleSentence?.ko || undefined,
-        collocations: d.collocations,
-        distractors: d.distractors,
+        exampleEn: r.exampleEn || d.example?.text || undefined,
+        exampleKo: r.exampleKo || d.example?.ko || undefined,
       };
     });
   };
@@ -305,15 +306,15 @@ const SingleWordForm: React.FC<{
               }
             }}
           />
-          <Button onClick={fill} disabled={!row.term.trim() || busy} className="shrink-0" aria-label="AI로 뜻과 예문 채우기">
-            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4 text-accent" />}
-            AI 채우기
+          <Button onClick={fill} disabled={!row.term.trim() || busy} className="shrink-0" aria-label="사전에서 뜻과 예문 채우기">
+            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <BookOpen className="w-4 h-4 text-accent" />}
+            사전 채우기
           </Button>
         </div>
       </Field>
       {isDuplicate && <p className="text-[13px] text-warn -mt-2">이미 이 단어장에 있는 단어입니다. 저장하면 내용이 갱신됩니다.</p>}
 
-      <Field label="뜻" hint="뜻을 비워 두고 Enter를 누르면 AI가 채워 줍니다.">
+      <Field label="뜻" hint="뜻을 비워 두고 Enter를 누르면 사전에서 채워 줍니다.">
         <input
           className={inputClass}
           value={row.meaning}
@@ -327,7 +328,7 @@ const SingleWordForm: React.FC<{
       {hasExtras && (
         <Card className="p-4">
           <div className="flex items-center justify-between">
-            <p className="text-[13px] font-semibold text-muted">AI가 채운 내용 · 확인 후 저장하세요</p>
+            <p className="text-[13px] font-semibold text-muted">사전에서 찾은 내용 · 확인 후 저장하세요</p>
             <button
               className="text-[13px] text-muted"
               onClick={() =>
@@ -365,9 +366,6 @@ const SingleWordForm: React.FC<{
 
 interface BatchSourceResult {
   words: ExtractedWord[];
-  /** Plain text read locally (kept so "AI로 더 정확하게" can re-run on it). */
-  text?: string;
-  viaAI: boolean;
 }
 
 type Script = 'hebrew' | 'greek' | 'kana' | 'cjk' | 'cyrillic' | 'latin' | 'other';
@@ -406,7 +404,7 @@ const toDraftRows = (words: ExtractedWord[], existingTerms: Set<string>, keyPref
       pronunciation: w.pronunciation,
       include: !dup && !problem,
       duplicate: dup,
-      warning: dup ? '이미 있는 단어' : problem,
+      warning: dup ? '이미 있는 단어' : problem || (w.meaning ? undefined : '뜻은 저장할 때 사전에서 찾아요'),
     };
   });
 
@@ -415,11 +413,41 @@ const parsedToWords = (res: ParsedImportResult): ExtractedWord[] =>
     .filter(r => r.isValid !== false && r.term && r.userMeaning)
     .map(r => ({ term: r.term, meaning: r.userMeaning, partOfSpeech: r.partOfSpeech, pronunciation: r.pronunciation }));
 
-/** Local parsing found too little compared with the amount of text → let AI read it. */
-function localResultLooksWeak(words: ExtractedWord[], text: string, lang: string): boolean {
+/**
+ * Lines that hold just a word of the learner's language (a word list without
+ * meanings, e.g. a photo of a word test). Their meanings are looked up in the
+ * dictionary when saving.
+ */
+function bareTerms(text: string, lang: string): ExtractedWord[] {
+  const expected = EXPECTED_SCRIPTS[lang];
+  const out: ExtractedWord[] = [];
+  for (const raw of text.split(/\n/)) {
+    const line = raw
+      .replace(/^[\s\d.)\]•·\-–—|~*]+/, '')
+      .replace(/[\s|~*.,;:]+$/, '')
+      .trim();
+    if (!line || line.length > 40 || /[가-힣\d]/.test(line) || line.split(/\s+/).length > 3) continue;
+    if (expected ? !expected.includes(scriptOf(line)) : scriptOf(line) === 'other') continue;
+    if (/^[a-z]$/i.test(line)) continue; // stray OCR letters
+    out.push({ term: line, meaning: '' });
+  }
+  return out;
+}
+
+/** Word–meaning pairs from any text, plus meaning-less words when the text is a bare word list. */
+function findWords(text: string, lang: string, existing: VocabularyItem[], label: string): ExtractedWord[] {
+  const words = parsedToWords(parseTextContent(text, label, existing));
+  const seen = new Set(words.map(w => w.term.toLowerCase()));
   const lines = text.split(/\n/).filter(l => l.trim().length > 1).length;
-  const suspicious = words.filter(w => rowProblem(w, lang)).length;
-  return words.length === 0 || (lines >= 5 && words.length < lines * 0.4) || suspicious > words.length * 0.2;
+  if (words.length < lines * 0.5) {
+    for (const w of bareTerms(text, lang)) {
+      if (!seen.has(w.term.toLowerCase())) {
+        seen.add(w.term.toLowerCase());
+        words.push(w);
+      }
+    }
+  }
+  return words;
 }
 
 const BatchImport: React.FC<{
@@ -433,7 +461,6 @@ const BatchImport: React.FC<{
   const [text, setText] = useState(initialText);
   const [rows, setRows] = useState<DraftRow[] | null>(null);
   const [source, setSource] = useState('');
-  const [localTexts, setLocalTexts] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
@@ -447,13 +474,12 @@ const BatchImport: React.FC<{
     if (list.length === 0) setError('단어를 찾지 못했습니다. 단어와 뜻이 잘 보이는지 확인해 주세요.');
   };
 
-  /** Reads one file: photos/PDFs → AI; documents/tables/text → instant local parsing, AI if that looks weak. */
-  const readOne = async (file: File): Promise<BatchSourceResult | { error: string }> => {
+  /**
+   * Reads one file on this device: photos with OCR, PDFs with PDF.js (scanned
+   * pages with OCR), documents/tables/text directly. No AI service is used.
+   */
+  const readOne = async (file: File, report: (msg: string) => void): Promise<BatchSourceResult | { error: string }> => {
     const kind = classifyFile(file);
-    if (kind === 'image' || kind === 'pdf') {
-      const res = await extractVocabularyFromFile(file, lang);
-      return res.ok ? { words: res.data, viaAI: true } : { error: `${file.name}: ${res.error}` };
-    }
     if (kind === 'unsupported') {
       const ext = file.name.split('.').pop()?.toLowerCase();
       const tip =
@@ -461,23 +487,45 @@ const BatchImport: React.FC<{
       return { error: `${file.name}: 이 파일은 바로 읽을 수 없어요. ${tip}` };
     }
     try {
-      let words: ExtractedWord[];
-      let plain = '';
       if (kind === 'sheet') {
         const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
-        words = parsedToWords(parseSpreadsheetData(workbook, file.name, existingInCollection));
-        plain = await extractPlainText(file);
+        const words = parsedToWords(parseSpreadsheetData(workbook, file.name, existingInCollection));
+        if (words.length > 0) return { words };
+        return { words: findWords(await extractPlainText(file), lang, existingInCollection, file.name) };
+      }
+      let text = '';
+      if (kind === 'image') {
+        report('사진을 준비하는 중…');
+        const image = await prepareImageForOcr(file);
+        report('사진에서 글자를 읽는 중… (처음 한 번은 글자 인식 자료를 받느라 조금 걸려요)');
+        text = await recognizeText(image, lang, p => report(`사진에서 글자를 읽는 중… ${Math.round(p * 100)}%`));
+      } else if (kind === 'pdf') {
+        text = await extractPdfText(file, lang, p =>
+          report(p.ocr ? `PDF ${p.page}/${p.pages}쪽: 스캔된 쪽이라 글자를 인식하는 중…` : `PDF ${p.page}/${p.pages}쪽 읽는 중…`)
+        );
       } else {
-        plain = await extractPlainText(file);
-        words = parsedToWords(parseTextContent(plain, file.name, existingInCollection));
+        text = await extractPlainText(file);
       }
-      if (localResultLooksWeak(words, plain, lang) && plain.trim()) {
-        const ai = await extractVocabularyFromText(plain, lang);
-        if (ai.ok) return { words: ai.data, viaAI: true, text: plain };
+      if (!text.trim()) {
+        return {
+          error:
+            kind === 'image'
+              ? `${file.name}: 글자를 찾지 못했어요. 밝은 곳에서 글자가 크고 반듯하게 보이도록 다시 찍어 주세요.`
+              : `${file.name}: 파일에서 글자를 찾지 못했어요.`,
+        };
       }
-      return { words, viaAI: false, text: plain };
-    } catch {
-      return { error: `${file.name}: 파일을 열지 못했어요. 파일이 손상되지 않았는지 확인해 주세요.` };
+      return { words: findWords(text, lang, existingInCollection, file.name) };
+    } catch (e) {
+      if (e instanceof ImagePrepError) {
+        return {
+          error:
+            e.code === 'HEIC_UNSUPPORTED'
+              ? `${file.name}: 이 브라우저는 아이폰 HEIC 사진을 열 수 없어요. 아이폰 설정 → 카메라 → 포맷 → "높은 호환성"으로 바꾸거나 스크린샷으로 넣어 주세요.`
+              : `${file.name}: 사진을 열지 못했어요. 다른 사진으로 시도해 주세요.`,
+        };
+      }
+      console.error('File read failed:', e);
+      return { error: `${file.name}: 파일을 읽지 못했어요. 파일이 손상되지 않았는지 확인해 주세요.` };
     }
   };
 
@@ -488,18 +536,14 @@ const BatchImport: React.FC<{
     setDone(null);
     const results: (BatchSourceResult | { error: string })[] = [];
     let finished = 0;
-    const label = (n: number) =>
-      files.length === 1
-        ? classifyFile(files[0]) === 'image'
-          ? '사진에서 단어를 찾는 중…'
-          : '파일에서 단어를 찾는 중…'
-        : `${files.length}개 중 ${n}개 읽음…`;
-    setBusy(label(0));
+    const label = (n: number) => `${files.length}개 중 ${n}개 읽음…`;
+    setBusy(files.length === 1 ? '파일을 읽는 중…' : label(0));
+    // One at a time: photo recognition is heavy and runs on this device.
     await mapWithConcurrency(
       files,
-      3,
+      1,
       async (f, i) => {
-        results[i] = await readOne(f);
+        results[i] = await readOne(f, msg => setBusy(files.length === 1 ? msg : `${label(finished)} ${msg}`));
       },
       () => setBusy(label(++finished))
     );
@@ -517,68 +561,64 @@ const BatchImport: React.FC<{
           merged.push(w);
         }
       }
-    setLocalTexts(ok.filter(r => !r.viaAI && r.text).map(r => r.text!));
     if (errors.length) setError(errors.join('\n'));
     if (ok.length) showRows(toDraftRows(merged, existingTerms, 'f', lang), files.length === 1 ? files[0].name : `파일 ${files.length}개`);
   };
 
-  const reRunWithAI = async () => {
-    if (localTexts.length === 0) return;
-    setBusy('AI가 더 정확하게 찾는 중…');
-    const res = await extractVocabularyFromText(localTexts.join('\n\n'), lang);
-    setBusy(null);
-    if (!res.ok) {
-      setError(res.error);
-      return;
-    }
-    setLocalTexts([]);
-    showRows(toDraftRows(res.data, existingTerms, 'ai', lang), source);
-  };
-
   const save = async () => {
     if (!rows) return;
-    const chosen = rows.filter(r => r.include && r.term.trim() && r.meaning.trim());
+    const chosen = rows.filter(r => r.include && r.term.trim());
     if (chosen.length === 0) return;
     setError(null);
 
+    // Words without a meaning (bare word lists) always get one from the dictionary;
+    // the others only when "사전에서 발음·예문 채우기" is on.
     let failed = 0;
-    if (enrich) {
-      const targets = chosen.filter(r => !r.pronunciation || !r.exampleEn).slice(0, MAX_AI_ENRICH);
-      if (targets.length > 0) {
-        setBusy(`AI로 발음·예문 채우는 중… 0/${targets.length}`);
-        await mapWithConcurrency(
-          targets,
-          4,
-          async r => {
-            const res = await analyzeWordWithAI(r.term, r.meaning, lang);
-            if (!res.ok) {
-              failed++;
-              return;
-            }
-            const d = res.data;
-            r.partOfSpeech = r.partOfSpeech || d.partOfSpeech || undefined;
-            r.pronunciation = r.pronunciation || d.pronunciation || undefined; // never overwrite the file's own
-            r.alternativeMeanings = d.alternativeMeanings.filter(m => m !== r.meaning).slice(0, 3);
-            r.collocations = d.collocations;
-            r.distractors = d.distractors;
-            if (!r.exampleEn && d.exampleSentence?.en) {
-              r.exampleEn = d.exampleSentence.en;
-              r.exampleKo = d.exampleSentence.ko;
-            }
-          },
-          n => setBusy(`AI로 발음·예문 채우는 중… ${n}/${targets.length}`)
-        );
-      }
+    let noMeaning = 0;
+    const targets = chosen.filter(r => !r.meaning.trim() || (enrich && (!r.pronunciation || !r.exampleEn))).slice(0, MAX_LOOKUPS);
+    if (targets.length > 0) {
+      setBusy(`사전에서 찾는 중… 0/${targets.length}`);
+      await mapWithConcurrency(
+        targets,
+        4,
+        async r => {
+          const res = await lookupWord(r.term, lang);
+          if (!res.ok) {
+            failed++;
+            return;
+          }
+          const d = res.data;
+          if (!r.meaning.trim()) r.meaning = d.meanings[0] || '';
+          r.partOfSpeech = r.partOfSpeech || d.partOfSpeech || undefined;
+          r.pronunciation = r.pronunciation || d.pronunciation || undefined; // never overwrite the file's own
+          r.alternativeMeanings = d.meanings.filter(m => m !== r.meaning).slice(0, 3);
+          if (!r.exampleEn && d.example?.text) {
+            r.exampleEn = d.example.text;
+            r.exampleKo = d.example.ko;
+          }
+        },
+        n => setBusy(`사전에서 찾는 중… ${n}/${targets.length}`)
+      );
+    }
+    const ready = chosen.filter(r => {
+      if (r.meaning.trim()) return true;
+      noMeaning++;
+      return false;
+    });
+    if (ready.length === 0) {
+      setBusy(null);
+      setError('뜻을 찾지 못해 저장하지 않았습니다. 뜻을 직접 입력해 주세요.');
+      return;
     }
 
-    const saved = onSave(chosen);
+    const saved = onSave(ready);
     setBusy(null);
-    setRows(null);
-    setText('');
-    setLocalTexts([]);
+    setRows(noMeaning > 0 ? rows.filter(r => r.include && !r.meaning.trim()) : null);
+    if (noMeaning === 0) setText('');
     setDone(
       `${saved}개 단어를 저장했습니다.` +
-        (failed > 0 ? ` (${failed}개는 AI 보강에 실패해 뜻만 저장했습니다. 단어장에서 다시 채울 수 있습니다.)` : '')
+        (noMeaning > 0 ? ` 뜻을 찾지 못한 ${noMeaning}개는 아래에 남겨 두었어요. 뜻을 직접 적어 저장해 주세요.` : '') +
+        (failed > noMeaning ? ' 일부 단어는 사전에서 발음·예문을 찾지 못해 뜻만 저장했습니다.' : '')
     );
   };
 
@@ -622,20 +662,12 @@ const BatchImport: React.FC<{
                 onClick={async () => {
                   setError(null);
                   setDone(null);
-                  const words = parsedToWords(parseTextContent(text, '붙여넣기', existingInCollection));
-                  if (localResultLooksWeak(words, text, lang)) {
-                    setBusy('AI가 단어를 찾는 중…');
-                    const ai = await extractVocabularyFromText(text, lang);
-                    setBusy(null);
-                    if (ai.ok) return showRows(toDraftRows(ai.data, existingTerms, 'p', lang), '붙여넣기');
-                  }
-                  setLocalTexts([text]);
-                  showRows(toDraftRows(words, existingTerms, 'p', lang), '붙여넣기');
+                  showRows(toDraftRows(findWords(text, lang, existingInCollection, '붙여넣기'), existingTerms, 'p', lang), '붙여넣기');
                 }}
               >
                 단어 찾기
               </Button>
-              <p className="text-[13px] text-muted">어떤 모양으로 적혀 있어도 괜찮아요. 깔끔한 목록은 바로, 복잡한 글은 AI가 골라 냅니다.</p>
+              <p className="text-[13px] text-muted">한 줄에 단어와 뜻을 함께 적어 주세요. 단어만 적으면 뜻은 저장할 때 사전에서 찾아요.</p>
             </>
           )}
 
@@ -685,14 +717,6 @@ const BatchImport: React.FC<{
               다시 하기
             </button>
           </div>
-          {localTexts.length > 0 && (
-            <button
-              onClick={reRunWithAI}
-              className="w-full flex items-center justify-center gap-1.5 h-10 rounded-xl bg-accent-soft text-[14px] text-ink"
-            >
-              <Sparkles className="w-4 h-4 text-accent" /> 빠진 단어가 있나요? AI로 더 정확하게 찾기
-            </button>
-          )}
           <Card className="divide-y divide-line overflow-hidden">
             {rows.map((r, i) => (
               <div key={r.key} className={`flex items-center gap-2 px-3 py-2 ${r.include ? '' : 'opacity-50'}`}>
@@ -735,7 +759,7 @@ const BatchImport: React.FC<{
           <label className="flex items-start gap-3 px-1 cursor-pointer">
             <input type="checkbox" className="mt-1 accent-[var(--accent)]" checked={enrich} onChange={e => setEnrich(e.target.checked)} />
             <span className="text-[14px] text-ink-2">
-              AI로 발음·예문 채우기 <span className="text-muted">(최대 {MAX_AI_ENRICH}개, 이미 있는 내용은 그대로 둡니다)</span>
+              사전에서 발음·예문 채우기 <span className="text-muted">(최대 {MAX_LOOKUPS}개, 이미 있는 내용은 그대로 둡니다)</span>
             </span>
           </label>
 

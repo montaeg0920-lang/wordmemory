@@ -1,6 +1,6 @@
 /**
  * High-Reliability File Import & Text Extraction Engine
- * Supports: XLSX, CSV, TXT, DOCX and pasted text (PDF/photos go through Gemini).
+ * Supports: XLSX, CSV, TXT, DOCX/PPTX/HWPX and pasted text (photos and PDFs: see ocr.ts / pdfText.ts).
  *
  * Implements:
  * 1. Intelligent column auto-detection (distinguishes Numbers, English terms, Korean meanings)
